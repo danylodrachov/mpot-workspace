@@ -1,0 +1,35 @@
+{
+  "source": "replyio",
+  "id": "1001",
+  "subject": "Re: Colaboración de guest post — VidaTech Blog",
+  "body": "<html><body><p>Hola Daniel,</p><p>Gracias por tu propuesta. Nos interesa publicar el artículo sobre estrategias de marketing digital. Nuestro precio por publicación es de $150 USD. ¿Podrías confirmar si están de acuerdo con este precio y cuándo podrían enviar el borrador?</p><p>Saludos,<br>María González<br>Editora - VidaTech Blog<br>maria.gonzalez@vidatechblog.com</p><br><hr><blockquote><p>El lun, 22 jun 2026, Daniel escribió:</p><p>Hola María, me gustaría explorar una colaboración de contenido con VidaTech Blog. Tenemos artículos de alta calidad sobre SEO y marketing digital...</p></blockquote></body></html>",
+  "from": "maria.gonzalez@vidatechblog.com",
+  "date": "2026-06-23T09:15:00Z",
+  "email": "maria.gonzalez@vidatechblog.com",
+  "name": "María González",
+  "company": "VidaTech Blog",
+  "raw": {
+    "id": 1001,
+    "channel": "email",
+    "isRead": false,
+    "subject": "Re: Colaboración de guest post — VidaTech Blog",
+    "bodyPreview": "Gracias por tu propuesta. Nos interesa publicar el artículo...",
+    "lastActivityDate": "2026-06-23T09:15:00Z",
+    "isLastMessagePlanned": false,
+    "contact": {
+      "id": 5550199,
+      "ownerId": 483253,
+      "fullName": "María González",
+      "email": "maria.gonzalez@vidatechblog.com",
+      "linkedInProfileUrl": null,
+      "phone": "",
+      "companyName": "VidaTech Blog",
+      "title": "Editora",
+      "isDeleted": false
+    },
+    "sequence": { "id": 420042, "name": "Guest Post Outreach — Q3" },
+    "category": { "id": 700077, "name": "Interested" },
+    "hasMeetingIntent": false,
+    "status": { "state": "active" }
+  }
+}

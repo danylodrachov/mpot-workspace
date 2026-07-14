@@ -1,0 +1,39 @@
+{
+  "columns": [
+    {
+      "name": "casino_name",
+      "type": "text"
+    },
+    {
+      "name": "country",
+      "type": "enum",
+      "values": [
+        "Austria",
+        "Brazil",
+        "Chile",
+        "Norway"
+      ]
+    },
+    {
+      "name": "cashback_type",
+      "type": "enum",
+      "values": [
+        "casino_general",
+        "crypto",
+        "live_casino",
+        "other",
+        "sports",
+        "vip_loyalty"
+      ]
+    },
+    {
+      "name": "cashback_rate_max",
+      "type": "text"
+    },
+    {
+      "name": "notes",
+      "type": "text"
+    }
+  ],
+  "category": "cashback_offers"
+}

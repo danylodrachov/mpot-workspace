@@ -1,0 +1,10 @@
+{
+  "board": "outreach",
+  "statuses": [
+    "to contact",
+    "contacted",
+    "negotiation",
+    "invoice request",
+    "to pay"
+  ]
+}

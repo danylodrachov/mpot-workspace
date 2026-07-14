@@ -1,0 +1,31 @@
+{
+  "columns": [
+    {
+      "name": "casino_name",
+      "type": "text"
+    },
+    {
+      "name": "country",
+      "type": "enum",
+      "values": [
+        "Austria",
+        "Brazil",
+        "Chile",
+        "Norway"
+      ]
+    },
+    {
+      "name": "manager_name",
+      "type": "text"
+    },
+    {
+      "name": "email",
+      "type": "text"
+    },
+    {
+      "name": "phone",
+      "type": "text"
+    }
+  ],
+  "category": "communication_managers"
+}

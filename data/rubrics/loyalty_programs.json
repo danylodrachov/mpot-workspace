@@ -1,0 +1,43 @@
+{
+  "columns": [
+    {
+      "name": "casino_name",
+      "type": "text"
+    },
+    {
+      "name": "country",
+      "type": "enum",
+      "values": [
+        "Austria",
+        "Brazil",
+        "Chile",
+        "Norway"
+      ]
+    },
+    {
+      "name": "loyalty_program_exists",
+      "type": "enum",
+      "values": [
+        "TRUE",
+        "FALSE"
+      ]
+    },
+    {
+      "name": "tier_count",
+      "type": "number"
+    },
+    {
+      "name": "reward_wagering_multiplier",
+      "type": "text"
+    },
+    {
+      "name": "points_expiry_months",
+      "type": "number"
+    },
+    {
+      "name": "notes",
+      "type": "text"
+    }
+  ],
+  "category": "loyalty_programs"
+}

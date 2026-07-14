@@ -1,0 +1,47 @@
+{
+  "columns": [
+    {
+      "name": "casino_name",
+      "type": "text"
+    },
+    {
+      "name": "country",
+      "type": "enum",
+      "values": [
+        "Austria",
+        "Brazil",
+        "Chile",
+        "Norway"
+      ]
+    },
+    {
+      "name": "welcome_package",
+      "type": "text"
+    },
+    {
+      "name": "welcome_bonus_casino",
+      "type": "text"
+    },
+    {
+      "name": "first_deposit_welcome_bonus_casino",
+      "type": "text"
+    },
+    {
+      "name": "second_deposit_welcome_bonus_casino",
+      "type": "text"
+    },
+    {
+      "name": "reload_bonus",
+      "type": "text"
+    },
+    {
+      "name": "rollover",
+      "type": "text"
+    },
+    {
+      "name": "rollover_description",
+      "type": "text"
+    }
+  ],
+  "category": "casino_bonuses"
+}

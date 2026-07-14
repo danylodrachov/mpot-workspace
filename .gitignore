@@ -1,0 +1,44 @@
+# Secrets — never commit
+.env
+.env.*
+.claude/skills/casino-website-scraping/casino-website-credentials.json
+.claude/settings.local.json
+
+# Generated run output — canonical workspace-root location
+casino-evidence/
+
+# Live browser/session profiles and runtime state
+.runtime/
+.claude/skills/casino-website-scraping/runtime/chrome-profiles/
+.playwright-mcp/
+
+# Live runtime plane — inbox/task dumps (PII), access tokens, day-plans; never commit
+state/
+runtime/
+
+# Fetched mail (PII) + registry — runtime data plane, never committed
+data/*
+!data/rubrics/
+!data/surfaces/
+
+# Per-casino configs (keep only the example); secrets live in the credentials file
+.claude/skills/casino-website-scraping/config/casinos/*.json
+
+debug/
+output/
+__pycache__/
+*.pyc
+.DS_Store
+__MACOSX/
+Archive.zip
+
+# Python tooling
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+.tokens/

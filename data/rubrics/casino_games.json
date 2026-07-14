@@ -1,0 +1,35 @@
+{
+  "columns": [
+    {
+      "name": "casino_name",
+      "type": "text"
+    },
+    {
+      "name": "country",
+      "type": "enum",
+      "values": [
+        "Austria",
+        "Brazil",
+        "Chile",
+        "Norway"
+      ]
+    },
+    {
+      "name": "game",
+      "type": "text"
+    },
+    {
+      "name": "number_of_games",
+      "type": "number"
+    },
+    {
+      "name": "number_of_games_is_approximate",
+      "type": "enum",
+      "values": [
+        "TRUE",
+        "FALSE"
+      ]
+    }
+  ],
+  "category": "casino_games"
+}

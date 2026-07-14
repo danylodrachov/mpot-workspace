@@ -1,0 +1,43 @@
+{
+  "columns": [
+    {
+      "name": "casino_name",
+      "type": "text"
+    },
+    {
+      "name": "country",
+      "type": "enum",
+      "values": [
+        "Austria",
+        "Brazil",
+        "Chile",
+        "Norway"
+      ]
+    },
+    {
+      "name": "program_name",
+      "type": "text"
+    },
+    {
+      "name": "tier_count",
+      "type": "number"
+    },
+    {
+      "name": "vip_entry_type",
+      "type": "enum",
+      "values": [
+        "account_status_based",
+        "activity_based",
+        "automatic",
+        "automatic_first_deposit",
+        "invite_only",
+        "unspecified"
+      ]
+    },
+    {
+      "name": "notes",
+      "type": "text"
+    }
+  ],
+  "category": "vip_betting_programs"
+}

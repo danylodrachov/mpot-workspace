@@ -1,0 +1,26 @@
+{
+  "_comment": "Scoped settings for the ORC claude -p session. H1 (effect-free wall) guards every PreToolUse; H4 (run-completeness) fires at Stop. Pass via --settings when spawning ORC headless.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/effect-free-wall.sh"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/run-completeness.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

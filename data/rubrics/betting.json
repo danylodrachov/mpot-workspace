@@ -1,0 +1,67 @@
+{
+  "columns": [
+    {
+      "name": "casino_name",
+      "type": "text"
+    },
+    {
+      "name": "country",
+      "type": "enum",
+      "values": [
+        "Austria",
+        "Brazil",
+        "Chile",
+        "Norway"
+      ]
+    },
+    {
+      "name": "min_bet_amount",
+      "type": "number"
+    },
+    {
+      "name": "min_bet_currency",
+      "type": "text"
+    },
+    {
+      "name": "max_bet_amount",
+      "type": "number"
+    },
+    {
+      "name": "max_bet_currency",
+      "type": "text"
+    },
+    {
+      "name": "betting_conditions",
+      "type": "text"
+    },
+    {
+      "name": "welcome_bonus_betting",
+      "type": "text"
+    },
+    {
+      "name": "welcome_pack_betting",
+      "type": "text"
+    },
+    {
+      "name": "bet_builder",
+      "type": "enum",
+      "values": [
+        "TRUE",
+        "FALSE"
+      ]
+    },
+    {
+      "name": "bet_builder_description",
+      "type": "text"
+    },
+    {
+      "name": "betting_live_streaming",
+      "type": "enum",
+      "values": [
+        "TRUE",
+        "FALSE"
+      ]
+    }
+  ],
+  "category": "betting"
+}

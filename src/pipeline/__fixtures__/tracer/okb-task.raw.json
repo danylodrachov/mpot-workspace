@@ -1,0 +1,77 @@
+{
+  "source": "clickup",
+  "id": "task_okb_001",
+  "name": "VidaTech Blog — María González",
+  "board": "outreach",
+  "status": "Negotiation",
+  "assignees": ["daniel"],
+  "due": null,
+  "url": "https://app.clickup.com/t/task_okb_001",
+  "list": "OKB Negotiation",
+  "comments": [
+    {
+      "id": "comment_001",
+      "comment_text": "Initial outreach sent. Waiting for reply.",
+      "user": { "username": "daniel", "id": "12345" },
+      "date": "1750550400000",
+      "resolved": false,
+      "parent": null,
+      "reply_count": 0
+    },
+    {
+      "id": "comment_002",
+      "comment_text": "Reply received: outlet interested, price $150 USD per placement. Need to confirm package details and draft URL.",
+      "user": { "username": "daniel", "id": "12345" },
+      "date": "1750636800000",
+      "resolved": false,
+      "parent": null,
+      "reply_count": 1
+    },
+    {
+      "id": "comment_003",
+      "comment_text": "Confirmed 3-article package. Invoice terms: net-30, bank transfer.",
+      "user": { "username": "daniel", "id": "12345" },
+      "date": "1750640400000",
+      "resolved": false,
+      "parent": "comment_002",
+      "reply_count": 0
+    }
+  ],
+  "raw": {
+    "id": "task_okb_001",
+    "name": "VidaTech Blog — María González",
+    "status": { "status": "Negotiation", "color": "#f9d900" },
+    "assignees": [{ "id": 12345, "username": "daniel", "email": "danylodrachov@gmail.com" }],
+    "due_date": null,
+    "url": "https://app.clickup.com/t/task_okb_001",
+    "list": { "id": "list_okb", "name": "OKB Negotiation" },
+    "custom_fields": [
+      {
+        "id": "field_importance",
+        "name": "📌 Importance",
+        "type": "drop_down",
+        "value": "2",
+        "type_config": {
+          "options": [
+            { "orderindex": 0, "name": "Low" },
+            { "orderindex": 1, "name": "Medium" },
+            { "orderindex": 2, "name": "High" }
+          ]
+        }
+      },
+      {
+        "id": "field_package_size",
+        "name": "Package Size",
+        "type": "number",
+        "value": "3"
+      },
+      {
+        "id": "field_price_per_post",
+        "name": "Price per Post",
+        "type": "currency",
+        "value": "150"
+      }
+    ],
+    "description": "Outreach to VidaTech Blog for guest post placement. Contact: María González (Editora)."
+  }
+}

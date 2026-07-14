@@ -1,0 +1,46 @@
+{
+  "tasks": [
+    {
+      "id": "86a1b2c5x",
+      "name": "Nostalgica.cl",
+      "status": { "status": "negotiation", "type": "custom" },
+      "due_date": "1750075200000",
+      "date_updated": "1750000000000",
+      "assignees": [
+        { "id": 1234, "username": "Danylo Drachov", "email": "danylodrachov@gmail.com" }
+      ],
+      "url": "https://app.clickup.com/t/86a1b2c5x",
+      "list": { "id": "901", "name": "Outreach kanban board" },
+      "folder": { "id": "801", "name": "RunMedia" },
+      "space": { "id": "701" }
+    },
+    {
+      "id": "86a9f8e2z",
+      "name": "Article 3 — Spanish market",
+      "status": { "status": "to submit", "type": "custom" },
+      "due_date": null,
+      "date_updated": "1749900000000",
+      "assignees": [
+        { "id": 1234, "username": "Danylo Drachov", "email": "danylodrachov@gmail.com" }
+      ],
+      "url": "https://app.clickup.com/t/86a9f8e2z",
+      "list": { "id": "902", "name": "Content kanban board" },
+      "folder": { "id": "801", "name": "RunMedia" },
+      "space": { "id": "701" }
+    },
+    {
+      "id": "86zzz0000",
+      "name": "Internal chore — not a board task",
+      "status": { "status": "open", "type": "open" },
+      "due_date": null,
+      "date_updated": "1749800000000",
+      "assignees": [
+        { "id": 1234, "username": "Danylo Drachov" }
+      ],
+      "url": "https://app.clickup.com/t/86zzz0000",
+      "list": { "id": "903", "name": "Engineering" },
+      "folder": null,
+      "space": { "id": "701" }
+    }
+  ]
+}

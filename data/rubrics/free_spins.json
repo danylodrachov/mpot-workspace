@@ -1,0 +1,49 @@
+{
+  "columns": [
+    {
+      "name": "casino_name",
+      "type": "text"
+    },
+    {
+      "name": "country",
+      "type": "enum",
+      "values": [
+        "Austria",
+        "Brazil",
+        "Chile",
+        "Norway"
+      ]
+    },
+    {
+      "name": "free_spins_type",
+      "type": "enum",
+      "values": [
+        "app_install",
+        "birthday",
+        "no_deposit",
+        "other",
+        "push_notification",
+        "referral",
+        "reload_deposit",
+        "telegram",
+        "tournament_lottery",
+        "vip_loyalty",
+        "welcome_first_deposit",
+        "wheel_of_fortune"
+      ]
+    },
+    {
+      "name": "free_spins_amount",
+      "type": "number"
+    },
+    {
+      "name": "free_spins_max",
+      "type": "number"
+    },
+    {
+      "name": "notes",
+      "type": "text"
+    }
+  ],
+  "category": "free_spins"
+}

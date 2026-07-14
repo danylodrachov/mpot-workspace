@@ -1,0 +1,27 @@
+{
+  "source": "replyio",
+  "id": "1002",
+  "subject": "Re: Guest post collaboration — Northwind Gear",
+  "body": "<html><body><p>Hi Daniel,</p><p>Thanks for reaching out. We'd be happy to run a sponsored post — our rate is $200 USD per placement. Let us know the topic and draft timeline.</p><p>Best,<br>Alex Nguyen<br>Editor - Northwind Gear<br>alex.nguyen@northwindgear.com</p><br><hr><blockquote><p>On Mon, Jun 22, 2026, Daniel wrote:</p><p>Hi Alex, I'd like to explore a content collaboration with Northwind Gear...</p></blockquote></body></html>",
+  "from": "alex.nguyen@northwindgear.com",
+  "date": "2026-06-23T11:05:00Z",
+  "email": "alex.nguyen@northwindgear.com",
+  "name": "Alex Nguyen",
+  "company": "Northwind Gear",
+  "raw": {
+    "id": 1002,
+    "channel": "email",
+    "isRead": false,
+    "subject": "Re: Guest post collaboration — Northwind Gear",
+    "bodyPreview": "Thanks for reaching out. We'd be happy to run a sponsored post...",
+    "lastActivityDate": "2026-06-23T11:05:00Z",
+    "contact": {
+      "fullName": "Alex Nguyen",
+      "email": "alex.nguyen@northwindgear.com",
+      "companyName": "Northwind Gear"
+    },
+    "sequence": { "id": 42, "name": "Guest Post Outreach — Q3" },
+    "category": { "id": 7, "name": "Interested" },
+    "status": { "state": "active" }
+  }
+}
