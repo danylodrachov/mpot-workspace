@@ -132,10 +132,13 @@ json_hash() {
 
 safe_rel_path() {
   local path="$1"
+  [ -z "$path" ] && return 0
   case "$path" in
-    *credentials*|*.env|*.env.*|*.pem|*.key|*/.git/*|*/cookies*|*/token*) printf '%s' '<REDACTED_PATH>' ;;
+    *credentials*|*.env|*.env.*|*.pem|*.key|*/.git/*|*/cookies*|*/token*) printf '%s' '' ;;
     "$PROJECT_ROOT"/*) printf '%s' "${path#"$PROJECT_ROOT"/}" ;;
-    *) printf '%s' "$path" ;;
+    [A-Za-z]:\\*|[A-Za-z]:/*) printf '%s' 'external-path-redacted' ;;
+    /*) printf '%s' 'external-path-redacted' ;;
+    *) local bounded="${path:0:512}"; printf '%s' "$bounded" ;;
   esac
 }
 
@@ -448,11 +451,40 @@ emit_hook_event() {
   esac
 }
 
+sanitize_paths_in_attrs() {
+  local attrs_json="$1" proj_root="$PROJECT_ROOT"
+  printf '%s' "$attrs_json" | jq -c --arg proj_root "$proj_root" '
+    walk(if type == "object" then
+      (if has("path") then .path |= (
+        if type == "string" and length > 0 then
+          if startswith($proj_root + "/") then .[($proj_root | length) + 1:]
+          elif test("^[A-Za-z]:[/\\\\]") then "external-path-redacted"
+          elif startswith("/") then "external-path-redacted"
+          elif test("credentials|env|pem|key|git|cookies|token") then ""
+          else .[0:512]
+          end
+        else . end
+      ) else . end) |
+      (if has("file_path") then .file_path |= (
+        if type == "string" and length > 0 then
+          if startswith($proj_root + "/") then .[($proj_root | length) + 1:]
+          elif test("^[A-Za-z]:[/\\\\]") then "external-path-redacted"
+          elif startswith("/") then "external-path-redacted"
+          elif test("credentials|env|pem|key|git|cookies|token") then ""
+          else .[0:512]
+          end
+        else . end
+      ) else . end)
+    else . end)
+  ' 2>/dev/null || printf '%s' "$attrs_json"
+}
+
 if [ "${1:-}" = "emit" ]; then
   event_type="${2:-}"; status="${3:-ok}"; attrs_json="${4-}"
   [ -n "$attrs_json" ] || attrs_json='{}'
   [ -n "$event_type" ] || { log_error "emit_event_type_missing"; exit 0; }
   if ! printf '%s' "$attrs_json" | jq -e . >/dev/null 2>&1; then log_error "emit_attrs_invalid_json:$event_type"; attrs_json='{"reason_code":"invalid_attrs_json"}'; fi
+  attrs_json="$(sanitize_paths_in_attrs "$attrs_json")"
   context_file="${CASINO_OBS_CONTEXT_FILE:-$OBS_ROOT/current-context.json}"
   append_event "$context_file" "$event_type" "$status" "$attrs_json"
   exit 0

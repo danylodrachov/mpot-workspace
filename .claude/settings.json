@@ -22,7 +22,7 @@
             "statusMessage": "Finalizing observability, then launching next casino unit",
             "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/casino-session-end.sh",
             "args": [],
-            "timeout": 90
+            "timeout": 55
           }
         ]
       }
