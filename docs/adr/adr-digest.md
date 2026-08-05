@@ -204,6 +204,15 @@ updates its section here in the same commit. (Renamed from `adr-progress.md`, 20
   runtime-reported only; missing → `null`; classify
   `exact|partial|estimated|unavailable`; MCP session totals never fabricated as
   per-operation; estimated excluded from exact totals.
+- **Scope (2026-07-22):** discovery limited to slots, live-casino, sports. All other
+  categories out of scope. Anonymous-first — agent starts unauthenticated, escalates to
+  human login only when a mandatory source is confirmed gated (revised 2026-07-24, see
+  ADR-001 §8: login is not a hard precondition and does not reliably expose compliance
+  links). `url-map-recon` MCP agent discovers URLs/routes only (revised 2026-07-24 — it
+  no longer extracts titles); a separate deterministic collector
+  (`src/research/url-map-recon/product-collector.ts`) extracts product names from
+  already-distilled inputs. Live-casino = category names only. Sports = sport titles
+  only. About/Legal excluded.
 - Validation gates (full list in `final-report.json.gate_results`): rubric completeness,
   terminal coverage, types/enums, logical-key/FK, duplicates/orphans, unsupported
   inference, conflict/no-silent-overwrite, evidence coverage + hash integrity, Claude

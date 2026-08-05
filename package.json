@@ -24,6 +24,7 @@
     "@googleapis/gmail": "^9.0.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "better-sqlite3": "^12.11.1",
+    "cheerio": "^1.0.0",
     "dotenv": "^16.4.5",
     "email-reply-parser": "^2.3.5",
     "exceljs": "^4.4.0",
