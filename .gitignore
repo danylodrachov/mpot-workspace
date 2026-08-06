@@ -52,6 +52,7 @@ src/orchestrator/
 src/pipeline/
 src/replyio/
 src/telegram/
+sessions/
 bin/build-day.sh
 bin/check-day.sh
 bin/check-labels.ts
