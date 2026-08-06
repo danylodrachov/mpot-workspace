@@ -64,6 +64,9 @@ bin/run-okb-e2e.ts
 bin/run-orc.ts
 bin/tracer.e2e-script.test.ts
 bin/tracer.filter.test.ts
+
+# Non-casino-discovery docs
+docs/adr/
 artifacts.zip
 CLAUDE.md
 CONTEXT.md
