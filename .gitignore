@@ -65,6 +65,11 @@ bin/run-orc.ts
 bin/tracer.e2e-script.test.ts
 bin/tracer.filter.test.ts
 artifacts.zip
+CLAUDE.md
+CONTEXT.md
+.mcp.json
+package.json
+package-lock.json
 docs/research/
 data/casino-partner-researches/
 data/inputs/
