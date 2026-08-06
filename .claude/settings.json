@@ -2,31 +2,12 @@
   "permissions": {
     "allow": [
       "Bash(nohup env -u CLAUDECODE claude -p --agent casino-session *)",
-      "Bash(${CLAUDE_PROJECT_DIR}/.claude/hooks/casino-observability.sh *)",
-      "Bash(${CLAUDE_PROJECT_DIR}/.claude/hooks/casino-observability-init.sh *)",
-      "Bash(${CLAUDE_PROJECT_DIR}/.claude/hooks/casino-observability-context.sh *)",
-      "Bash(${CLAUDE_PROJECT_DIR}/.claude/hooks/casino-observability-finalize.sh *)",
-      "Bash(${CLAUDE_PROJECT_DIR}/.claude/hooks/casino-session-end.sh *)",
       "mcp__playwright__*",
-      "Write(.runtime/casino/spawn-next)",
-      "Write(.runtime/casino/batch.done)"
+      "Edit(.runtime/casino/spawn-next)",
+      "Edit(.runtime/casino/batch.done)"
     ]
   },
   "hooks": {
-    "SessionEnd": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "statusMessage": "Finalizing observability, then launching next casino unit",
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/casino-session-end.sh",
-            "args": [],
-            "timeout": 55
-          }
-        ]
-      }
-    ],
     "PreToolUse": [
       {
         "hooks": [
@@ -44,17 +25,6 @@
             "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/adr-guard.sh"
           }
         ]
-      },
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/casino-observability.sh",
-            "args": [],
-            "timeout": 5
-          }
-        ]
       }
     ],
     "Stop": [
@@ -64,17 +34,6 @@
             "type": "command",
             "async": true,
             "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/notify.sh \"Claude Code\" \"Claude has finished responding\" \"Pop\""
-          }
-        ]
-      },
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/casino-observability.sh",
-            "args": [],
-            "timeout": 5
           }
         ]
       }
@@ -87,214 +46,6 @@
             "type": "command",
             "async": true,
             "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/notify.sh \"Claude Code — Action Needed\" \"Permission approval required\" \"Funk\""
-          }
-        ]
-      }
-    ],
-    "SessionStart": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/casino-observability.sh",
-            "args": [],
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/casino-observability.sh",
-            "args": [],
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/casino-observability.sh",
-            "args": [],
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "PostToolUseFailure": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/casino-observability.sh",
-            "args": [],
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "PostToolBatch": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/casino-observability.sh",
-            "args": [],
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "PermissionRequest": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/casino-observability.sh",
-            "args": [],
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "PermissionDenied": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/casino-observability.sh",
-            "args": [],
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "SubagentStart": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/casino-observability.sh",
-            "args": [],
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "SubagentStop": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/casino-observability.sh",
-            "args": [],
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "StopFailure": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/casino-observability.sh",
-            "args": [],
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "PreCompact": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/casino-observability.sh",
-            "args": [],
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "PostCompact": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/casino-observability.sh",
-            "args": [],
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "InstructionsLoaded": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/casino-observability.sh",
-            "args": [],
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "ConfigChange": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/casino-observability.sh",
-            "args": [],
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "TaskCreated": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/casino-observability.sh",
-            "args": [],
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "TaskCompleted": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/casino-observability.sh",
-            "args": [],
-            "timeout": 5
           }
         ]
       }

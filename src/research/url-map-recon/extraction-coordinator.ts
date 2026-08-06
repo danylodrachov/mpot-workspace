@@ -13,11 +13,13 @@ import {
   SOURCE_FAMILIES,
   emptyCoverage,
   type ExtractorInput,
+  type ExtractorInputContractMismatch,
+  type RawUrlCandidate,
   type RecipeStepV1,
   type SourceCoverage,
   type SourceFamily,
 } from './types.ts';
-import { runExtractor } from './extractors.ts';
+import { runExtractor, resolveCandidates, detectInputKind, getAcceptedInputTypes } from './extractors.ts';
 import { cleanAndCanonicalize } from './url-clean.ts';
 
 export type InputProvider = (step: RecipeStepV1, index: number) => ExtractorInput;
@@ -34,9 +36,14 @@ export type InputProvider = (step: RecipeStepV1, index: number) => ExtractorInpu
  * @param origin - Origin for filtering same-origin URLs (extracted from first step's pageUrl)
  *
  * Persists:
- * - raw-url-candidates.json: array of same-origin extracted URLs per step
+ * - raw-url-candidates.json: a flat, deduplicated array of same-origin extracted URLs
  * - url-source-coverage.json: one entry per source family with status
  */
+export type ExtractAndPersistResult = {
+  /** Every raw-source dispatch that hit an extractor input contract mismatch (Issue 29). */
+  contractViolations: ExtractorInputContractMismatch[];
+};
+
 export async function extractAndPersist(
   baseDir: string,
   casinoId: string,
@@ -45,7 +52,7 @@ export async function extractAndPersist(
   steps: RecipeStepV1[],
   provideInput: InputProvider,
   origin?: string,
-): Promise<void> {
+): Promise<ExtractAndPersistResult> {
   // Validate inputs
   if (!baseDir || !casinoId || !geo || !runId || steps.length === 0) {
     throw new Error('Missing required extraction parameters');
@@ -65,7 +72,10 @@ export async function extractAndPersist(
 
   // Track which source families were used and their status
   const usedSourceFamilies = new Map<SourceFamily, string>();
-  const allCandidates: string[][] = [];
+  const countsByFamily = new Map<SourceFamily, number>();
+  const allCandidates: RawUrlCandidate[] = [];
+  const seenCandidates = new Set<string>();
+  const contractViolations: ExtractorInputContractMismatch[] = [];
 
   // Execute each extraction step
   for (let i = 0; i < steps.length; i++) {
@@ -78,33 +88,76 @@ export async function extractAndPersist(
 
     // Get input for this step
     const input = provideInput(step, i);
-
-    // Run extractor (pure TS, no agents)
-    const result = runExtractor(step.extractorId, { ...input, pageUrl: input.pageUrl || step.pageUrl });
-
-    // Track this source family and its status
+    const effectivePageUrl = input.pageUrl || step.pageUrl;
     const sourceFamily = mapSourceToFamily(step.source);
+
+    let stepStatus: 'ok' | 'empty' | 'error';
+    let sameOriginUrls: string[];
+
+    if (input.candidates !== undefined) {
+      // Candidate-ingestion path (Issue 29): a `candidates` observation is
+      // already-extracted output. It never reaches a raw HTML/JSON/XML/text
+      // source-parser, regardless of which extractor id it is provenance for —
+      // every extractor id whose observation carries candidates goes through the
+      // same validate/resolve/dedupe/origin checks here instead of `runExtractor`.
+      const { urls } = resolveCandidates(input.candidates, effectivePageUrl);
+      sameOriginUrls = filterSameOrigin(urls, originUrl);
+      stepStatus = sameOriginUrls.length > 0 ? 'ok' : 'empty';
+    } else {
+      const receivedInputType = detectInputKind(input);
+      const acceptedTypes = sourceFamily ? getAcceptedInputTypes(step.extractorId) : [];
+      if (receivedInputType && sourceFamily && !acceptedTypes.includes(receivedInputType)) {
+        // Raw-source observation dispatched to an extractor that does not accept
+        // this input kind: typed failure, never an empty successful result.
+        contractViolations.push({
+          code: 'EXTRACTOR_INPUT_CONTRACT_MISMATCH',
+          extractorId: step.extractorId,
+          observationId: input.observationId,
+          expectedInputTypes: acceptedTypes,
+          receivedInputType,
+          sourceFamily,
+        });
+        stepStatus = 'error';
+        sameOriginUrls = [];
+      } else {
+        // Raw-source extraction: pure TS parser, no agent calls.
+        const result = runExtractor(step.extractorId, { ...input, pageUrl: effectivePageUrl });
+        stepStatus = result.status;
+        sameOriginUrls = filterSameOrigin(result.urls, originUrl);
+      }
+    }
+
+    // Track this source family and its status: error > blocked > absent > present > unsupported
     if (sourceFamily) {
-      // Record status: error > present > unsupported
       const currentStatus = usedSourceFamilies.get(sourceFamily) || 'unsupported';
       let newStatus = currentStatus;
-      if (result.status === 'error') {
+      if (input.sourceStatus === 'blocked') {
+        newStatus = 'blocked';
+      } else if (input.sourceStatus === 'absent' && currentStatus !== 'blocked') {
+        newStatus = 'absent';
+      } else if (stepStatus === 'error' && currentStatus !== 'blocked') {
         newStatus = 'error';
-      } else if (result.status === 'ok' || result.status === 'empty') {
+      } else if ((stepStatus === 'ok' || stepStatus === 'empty') && !['blocked', 'absent'].includes(currentStatus)) {
         newStatus = 'present';
       }
       usedSourceFamilies.set(sourceFamily, newStatus);
     }
 
-    // Filter to same-origin URLs only (external candidates not persisted)
-    const sameOriginUrls = filterSameOrigin(result.urls, originUrl);
-
-    // Store results per step to maintain extraction path
-    if (sameOriginUrls.length > 0) {
-      allCandidates.push(sameOriginUrls);
-    } else {
-      // Even zero-result steps get an entry (AC1)
-      allCandidates.push([]);
+    // Flatten into one deduplicated candidate collection (AC: raw-url-candidates.json
+    // is a flat array per its schema, not a nested [[]] grouped by extraction step),
+    // retaining provenance (extractor id, source family, observation id) per candidate.
+    if (sourceFamily) {
+      for (const url of sameOriginUrls) {
+        if (seenCandidates.has(url)) continue;
+        seenCandidates.add(url);
+        allCandidates.push({
+          url,
+          sourceFamily,
+          extractorId: step.extractorId,
+          observationId: input.observationId,
+        });
+        countsByFamily.set(sourceFamily, (countsByFamily.get(sourceFamily) ?? 0) + 1);
+      }
     }
   }
 
@@ -112,10 +165,19 @@ export async function extractAndPersist(
   const candidatesPath = path.join(outDir, 'raw-url-candidates.json');
   await writeAtomicJSON(candidatesPath, allCandidates);
 
-  // Build and persist coverage
-  const coverage = buildCoverage(usedSourceFamilies);
+  // Build and persist coverage (candidate counts per family match accepted Stage 3 candidates)
+  const coverage = buildCoverage(usedSourceFamilies, countsByFamily);
   const coveragePath = path.join(outDir, 'url-source-coverage.json');
   await writeAtomicJSON(coveragePath, coverage);
+
+  // Persist any extractor input contract violations for observability (Issue 29).
+  // Never silently dropped and never converted into an empty successful result.
+  if (contractViolations.length > 0) {
+    const violationsPath = path.join(outDir, 'extractor-input-contract-violations.json');
+    await writeAtomicJSON(violationsPath, contractViolations);
+  }
+
+  return { contractViolations };
 }
 
 /**
@@ -137,6 +199,9 @@ function mapSourceToFamily(source: string): SourceFamily | null {
     spa_route: 'spa_route',
     document_metadata: 'document_metadata',
     frame_form: 'frame_form',
+    inline_script: 'inline_script',
+    same_origin_script: 'same_origin_script',
+    menu_injected: 'menu_injected',
   };
   return (map[source] as SourceFamily) || null;
 }
@@ -146,10 +211,11 @@ function mapSourceToFamily(source: string): SourceFamily | null {
  * Families that were used get their status (error/present/unsupported).
  * Zero-result families still report 'present' status (AC1).
  */
-function buildCoverage(familyStatuses: Map<SourceFamily, string>): SourceCoverage {
+function buildCoverage(familyStatuses: Map<SourceFamily, string>, countsByFamily: Map<SourceFamily, number>): SourceCoverage {
   return emptyCoverage().map((entry) => {
     const status = (familyStatuses.get(entry.sourceFamily) || 'unsupported') as any;
-    return { ...entry, status };
+    const count = countsByFamily.get(entry.sourceFamily) ?? 0;
+    return { ...entry, status, count };
   });
 }
 

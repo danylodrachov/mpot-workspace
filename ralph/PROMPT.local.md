@@ -30,7 +30,9 @@ You are ONE iteration of the LOCAL Ralph loop for the afk-agent project. Do exac
 ## 4. Build to pass the locked test  (gate 2)
 - Implement the SMALLEST change that makes the locked test pass. Respect the ADRs for that area.
 - NEVER edit the locked test to make code pass. If the test itself is wrong, say so explicitly in the issue's "Critic notes" (step 6) and re-lock it deliberately.
-- Run `npm run typecheck` and `npm run test` until green.
+- Run `npm run typecheck` and the backlog's verify command until green.
+- If the issue says to REPLACE, REWIRE or RETIRE something that already exists, you must change that existing thing. Adding a second implementation beside it and leaving the old one wired up is a FAILURE, even when it makes an acceptance criterion technically true. Before finishing, grep for the old entry point: if anything outside its own tests still calls it, you are not done.
+- A passing test count is not green. Read the verify command's actual output: if it prints stage failures, missing artifacts, or caught errors, the run is broken and the criterion is not met — fix it or flag it, never proceed.
 
 ## 5. Critic pass — attack your own work  (gate 3)
 - Re-read your whole change adversarially:
@@ -47,8 +49,14 @@ You are ONE iteration of the LOCAL Ralph loop for the afk-agent project. Do exac
   - **Your check:** ⏳ not tested yet
   ```
 
-## 7. Close out (local — no git)
-- Set the issue frontmatter `status: done`.
+## 7. Verify every acceptance criterion  (gate 5: no criterion closes itself)
+- Walk the issue's acceptance criteria list ONE BY ONE, in order. For each, run the observation it describes and look at the result.
+- Tick `- [ ]` → `- [x]` only for a criterion you just observed holding. Under the list, record the one command or artifact path that showed it.
+- A criterion you could not observe, or that failed, stays `- [ ]`.
+- If ANY criterion is still `- [ ]` after this walk, you may NOT set `status: done`. Set `status: blocked`, add `> BLOCKED: <which criteria and why>` at the top of the issue body, and stop.
+
+## 8. Close out (local — no git)
+- Set the issue frontmatter `status: done` — permitted only when every acceptance criterion is `- [x]` per step 7.
 - In every OTHER issue whose `blocked_by` is now fully satisfied, leave `status` as-is (the loop computes availability live) — but update `issues/README.md` status column for this issue to `done`.
 - Append a "Critic notes" subsection to the issue with your gate-3 answers.
 - Stop. Do not start another issue.
@@ -56,5 +64,8 @@ You are ONE iteration of the LOCAL Ralph loop for the afk-agent project. Do exac
 ## Hard rules
 - ONE issue per run.
 - Never edit a locked test to make code pass.
+- Never set `status: done` while any acceptance criterion is unticked.
+- Never satisfy a criterion by building a parallel path beside the thing the issue told you to replace.
 - Never run two `backbone` issues' worth of work in one pass; never touch a shared contract/type owned by a `backbone` issue, outside the issue that owns it — the specific contract (file/shape) is whatever the current backbone issue's frontmatter and body identify, not a hardcoded path.
 - If you hit anything undescribed (unknown board status, missing criteria, missing fixture, ambiguous spec), HALT and flag it in the issue body — never guess past it.
+- This loop runs unattended: nobody is watching to answer you. If you need a permission you do not have, or are otherwise stuck waiting on a human, do NOT end your turn by asking. Write `> BLOCKED: <what you needed>` at the top of the issue body, set `status: ready` to release your claim, and stop. An issue left `in_progress` is never AVAILABLE again and wedges every issue behind it.

@@ -14,7 +14,7 @@
 - `docs/adr/README-codebase.md` — code layout (sole source)
 - `issues/` — work items 01–10 + README
 - `sessions/` — sessions and session fact summaries (weekly); record new facts via `/session-facts` at session end
-- `data/registry.json` — cross-day registry; sole writer = orchestrator
+- `data/data-registry.json` — cross-day registry; sole writer = orchestrator
 
 ## Agent skills
 

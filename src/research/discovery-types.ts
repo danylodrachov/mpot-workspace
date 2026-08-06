@@ -97,6 +97,16 @@ export function validateStableIdType(idType: unknown): asserts idType is StableI
   }
 }
 
+// --- Shared artifact filename constants -----------------------------------------
+
+/**
+ * Canonical filename for the Stage 11 page-behavior profiling artifact (Issue 28).
+ * Producers (page-interactivity-profiler, interaction-delta-profiler) and consumers
+ * (field-collector, product-collector, stage-dispatcher) must all resolve this same
+ * name — do not repeat the "page-behavior.json" string literal in new code.
+ */
+export const PAGE_BEHAVIOR_ARTIFACT = "page-behavior.json";
+
 // --- Artifact ownership registry -----------------------------------------------
 
 export const ARTIFACT_MUTATION_MODES = ["immutable-create", "append-only", "report-only"] as const;
@@ -117,61 +127,172 @@ export type ArtifactOwnershipEntry = {
  * Artifact ownership registry: every canonical artifact has exactly one producer
  * and one mutation mode. The producer is responsible for creating and managing
  * the artifact lifecycle.
+ *
+ * Updated for pipeline v2 (issues 01-18): removed legacy artifacts (sports.json,
+ * live-casino.json, slots.json, document-url-map.json, regex-clean-decisions.jsonl)
+ * and added new artifacts produced by current modules.
  */
 export const ARTIFACT_OWNERS: ArtifactOwnershipEntry[] = [
   // Run context and tracing
   { artifact: "run-context.json", producer: "orchestrator", mode: "immutable-create", canonical: true },
   { artifact: "trace-events.jsonl", producer: "system", mode: "append-only", canonical: true },
 
-  // URL discovery and cleaning
+  // Stage 0: browser agent observation handoff (Issue 24) — the only artifact
+  // browser agents (url-map-recon, discovery-browser) write directly. Deterministic
+  // stages read it through src/research/observation-provider.ts.
   {
-    artifact: "document-url-map.json",
-    producer: "recon-agent",
+    artifact: "page-observations.jsonl",
+    producer: "browser-agent",
+    mode: "append-only",
+    canonical: false,
+  },
+
+  // Stage 1: URL discovery (url-map-recon) — now produced deterministically from
+  // page-observations.jsonl by the stage 1 handler, not written directly by the agent.
+  {
+    artifact: "raw-url-candidates.json",
+    producer: "system",
     mode: "immutable-create",
     canonical: true,
   },
   {
     artifact: "url-source-coverage.json",
-    producer: "recon-agent",
+    producer: "system",
     mode: "immutable-create",
     canonical: true,
   },
   {
     artifact: "extraction-recipe.json",
-    producer: "recon-agent",
+    producer: "system",
+    mode: "immutable-create",
+    canonical: true,
+  },
+
+  // Stage 7: URL cleaning (url-cleaning-coordinator)
+  {
+    artifact: "clean-url-inventory.json",
+    producer: "system",
     mode: "immutable-create",
     canonical: true,
   },
   {
-    artifact: "regex-clean-decisions.jsonl",
+    artifact: "deterministic-rejected-urls.json",
+    producer: "system",
+    mode: "immutable-create",
+    canonical: true,
+  },
+  {
+    artifact: "url-clean-decisions.jsonl",
     producer: "system",
     mode: "append-only",
     canonical: true,
   },
 
-  // Product collection
-  { artifact: "sports.json", producer: "product-collector", mode: "immutable-create", canonical: true },
+  // Stage 8: URL metadata classification
   {
-    artifact: "live-casino.json",
-    producer: "product-collector",
+    artifact: "url-metadata-classifications.json",
+    producer: "system",
     mode: "immutable-create",
     canonical: true,
   },
-  { artifact: "slots.json", producer: "product-collector", mode: "immutable-create", canonical: true },
 
-  // Behavior profiling
+  // Stage 5: Template requirements compilation
   {
-    artifact: "page-behavior.json",
+    artifact: "field-requirements.json",
+    producer: "system",
+    mode: "immutable-create",
+    canonical: true,
+  },
+  {
+    artifact: "dropdown-catalog.json",
+    producer: "system",
+    mode: "immutable-create",
+    canonical: true,
+  },
+
+  // Stage 9: URL field relevance scoring
+  {
+    artifact: "raw-relevance-scores.json",
+    producer: "system",
+    mode: "immutable-create",
+    canonical: true,
+  },
+
+  // Stage 10: Relevance validation
+  {
+    artifact: "visit-plan.json",
+    producer: "system",
+    mode: "immutable-create",
+    canonical: true,
+  },
+
+  // Stage 11: Page interactivity profiling
+  {
+    artifact: PAGE_BEHAVIOR_ARTIFACT,
     producer: "browser-agent",
     mode: "immutable-create",
     canonical: true,
   },
 
-  // Final review
+  // Stage 12: Interaction execution and evidence redaction
   {
-    artifact: "discovery-review.html",
-    producer: "reviewer-agent",
-    mode: "report-only",
+    artifact: "field-evidence.json",
+    producer: "browser-agent",
+    mode: "immutable-create",
+    canonical: true,
+  },
+
+  // Stage 13: Field and product collection
+  {
+    artifact: "field-catalog.json",
+    producer: "product-collector",
+    mode: "immutable-create",
+    canonical: true,
+  },
+
+  // Stage 14: Normalisation and conflict resolution
+  {
+    artifact: "normalisation-decisions.jsonl",
+    producer: "system",
+    mode: "append-only",
+    canonical: true,
+  },
+  {
+    artifact: "dropdown-additions.json",
+    producer: "system",
+    mode: "immutable-create",
+    canonical: true,
+  },
+
+  // Stage 15: Coverage and delta generation
+  {
+    artifact: "field-coverage.json",
+    producer: "system",
+    mode: "immutable-create",
+    canonical: true,
+  },
+  {
+    artifact: "discovery-delta.json",
+    producer: "system",
+    mode: "immutable-create",
+    canonical: true,
+  },
+
+  // Stage 16: Ranked gap probing and merge
+  {
+    artifact: "validated-gap-patch.json",
+    producer: "system",
+    mode: "immutable-create",
+    canonical: true,
+  },
+
+  // Stage 16: Report rendering (final-report-renderer.ts). "discovery-report.html" was the
+  // aspirational name from an earlier design; the deterministic renderer that actually ships
+  // writes "discovery-review.json".
+  {
+    artifact: "discovery-review.json",
+    producer: "system",
+    mode: "immutable-create",
     canonical: true,
   },
 ];

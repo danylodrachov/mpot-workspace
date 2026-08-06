@@ -8,6 +8,7 @@
 #
 # Usage:  bash ralph/ralph-loop.local.sh [max_iterations]
 # Model: sonnet by default (each iteration is the build subagent). Override: RALPH_MODEL=opus
+# Effort: low by default. Override: RALPH_EFFORT=medium
 # NOTE: for true unattended runs, run inside a sandbox/container — acceptEdits still pauses
 # on riskier actions, so an interactive run is the safe default.
 set -euo pipefail
@@ -16,7 +17,7 @@ cd "$(dirname "$0")/.."
 MAX="${1:-5}"
 for i in $(seq 1 "${MAX}"); do
   echo "=== Ralph LOCAL iteration ${i}/${MAX} ==="
-  OUT="$(claude --permission-mode acceptEdits --model "${RALPH_MODEL:-sonnet}" -p "$(cat ralph/PROMPT.local.md)")"
+  OUT="$(claude --permission-mode acceptEdits --model "${RALPH_MODEL:-sonnet}" --effort "${RALPH_EFFORT:-low}" -p "$(cat ralph/PROMPT.local.md)")"
   echo "${OUT}"
   if grep -q '<promise>COMPLETE</promise>' <<<"${OUT}"; then
     echo "=== Ralph LOCAL: no available issues left — stopping. ==="

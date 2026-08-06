@@ -26,6 +26,12 @@ export interface RunContext {
   probe_policy_hash: string;
   timestamp: string;
   authentication_disabled: true;
+  /** Metadata tracking which provider supplied observations for this run (Issue 24) */
+  observation_provider?: {
+    provider_type: 'fixture_recorded' | 'live_browser';
+    provider_name?: string;
+    observations_path?: string;
+  };
 }
 
 /**
@@ -40,6 +46,8 @@ export interface InitializeRunConfig {
   url_rules_path: string;
   run_id?: string;
   storage_state_path?: string;
+  /** Which provider supplied this run's observations (Issue 24). Omitted for runs that never touch stages 1-13's observation seam. */
+  observation_provider?: RunContext['observation_provider'];
 }
 
 /**
@@ -50,6 +58,7 @@ export interface InitializeRunResult {
   casino_id: string;
   geo: string;
   run_dir: string;
+  canonical_origin: string;
 }
 
 /**
@@ -200,6 +209,7 @@ export async function initializeRun(config: InitializeRunConfig): Promise<Initia
     probe_policy_hash,
     timestamp: new Date().toISOString(),
     authentication_disabled: true,
+    ...(config.observation_provider ? { observation_provider: config.observation_provider } : {}),
   };
 
   await writeAtomicJSON(run_context_path, run_context, { immutable: true });
@@ -225,5 +235,6 @@ export async function initializeRun(config: InitializeRunConfig): Promise<Initia
     casino_id,
     geo: config.geo,
     run_dir,
+    canonical_origin,
   };
 }

@@ -77,8 +77,8 @@ test('AC2: External URLs not persisted as visit candidates', async () => {
     const candidatesPath = path.join(outDir, 'raw-url-candidates.json');
     const candidates = JSON.parse(fs.readFileSync(candidatesPath, 'utf-8'));
 
-    // Should only contain same-origin URLs
-    const urls: string[] = candidates.flat();
+    // Should only contain same-origin URLs (Issue 29: entries carry provenance)
+    const urls: string[] = candidates.map((c: { url: string }) => c.url);
     assert.ok(urls.some((u) => u.includes('example.com/lobby')), 'should include same-origin URLs');
     assert.ok(
       !urls.some((u) => u.includes('external.com')),
@@ -120,7 +120,7 @@ test('AC3: Error sources do not prevent partial run', async () => {
     const candidates = JSON.parse(fs.readFileSync(candidatesPath, 'utf-8'));
 
     // Should have results from the valid step even though one failed
-    const urls: string[] = candidates.flat();
+    const urls: string[] = candidates.map((c: { url: string }) => c.url);
     assert.ok(urls.some((u) => u.includes('/account')), 'valid results should persist despite error in other step');
   } finally {
     fs.rmSync(tempDir, { recursive: true });
@@ -245,7 +245,7 @@ test('AC1+2+3 integrated: Multiple sources with mixed results and coverage track
     const coverage = JSON.parse(fs.readFileSync(coveragePath, 'utf-8'));
 
     // Verify candidates contain results from all sources
-    const allUrls: string[] = candidates.flat();
+    const allUrls: string[] = candidates.map((c: { url: string }) => c.url);
     assert.ok(allUrls.some((u) => u.includes('/lobby')), 'should have DOM anchor URL');
     assert.ok(allUrls.some((u) => u.includes('/en')), 'should have canonical URL');
     assert.ok(allUrls.some((u) => u.includes('sitemap')), 'should have sitemap URL');

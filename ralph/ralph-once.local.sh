@@ -7,7 +7,8 @@
 # acceptEdits = it may edit files without asking, but still pauses for anything riskier.
 # Pinned to sonnet: the iteration IS the build subagent — no parent session delegating,
 # the whole issue is built on the cheaper model. Override: RALPH_MODEL=opus bash ...
+# Effort: low by default. Override: RALPH_EFFORT=medium bash ...
 # Run from the repo root:  bash ralph/ralph-once.local.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
-claude --permission-mode acceptEdits --model "${RALPH_MODEL:-sonnet}" "$(cat ralph/PROMPT.local.md)"
+claude --permission-mode acceptEdits --model "${RALPH_MODEL:-sonnet}" --effort "${RALPH_EFFORT:-low}" "$(cat ralph/PROMPT.local.md)"

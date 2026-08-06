@@ -7,12 +7,38 @@
 // the function signature never echoes the scanned source body back to the
 // caller — only `urls` / `status` / `error` leave the function.
 
-import type { ExtractorFn, ExtractorId, ExtractorInput, ExtractorResult } from './types.ts';
+import {
+  EXTRACTOR_ACCEPTED_INPUT_TYPES,
+  type ExtractorFn,
+  type ExtractorId,
+  type ExtractorInput,
+  type ExtractorInputKind,
+  type ExtractorResult,
+} from './types.ts';
 
 const MAX_RESULTS = 500;
 const MAX_URL_LENGTH = 2000;
 
-function resolveCandidates(candidates: string[], pageUrl: string): { urls: string[]; rejectedCount: number } {
+/** Which of the accepted extractor input contracts are present on this input, if any. */
+export function detectInputKind(input: ExtractorInput): ExtractorInputKind | undefined {
+  if (input.html !== undefined) return 'html';
+  if (input.json !== undefined) return 'json';
+  if (input.text !== undefined) return 'text';
+  if (input.scripts !== undefined) return 'scripts';
+  return undefined;
+}
+
+export function getAcceptedInputTypes(id: ExtractorId): ExtractorInputKind[] {
+  return EXTRACTOR_ACCEPTED_INPUT_TYPES[id] ?? [];
+}
+
+/**
+ * Validate + resolve pre-extracted candidate strings against the same scheme /
+ * length / count / dedupe checks every extractor's raw-source output goes through.
+ * Shared by the candidate-ingestion path (extraction-coordinator.ts) and any
+ * extractor whose raw output is itself a candidate list.
+ */
+export function resolveCandidates(candidates: string[], pageUrl: string): { urls: string[]; rejectedCount: number } {
   const urls: string[] = [];
   const seen = new Set<string>();
   let rejectedCount = 0;
@@ -87,6 +113,14 @@ const frameFormUrls: ExtractorFn = (input) => {
   return finish(input.pageUrl, candidates);
 };
 
+// NETWORK_REQUEST_URLS_V1 and PERFORMANCE_RESOURCE_URLS_V1 declare no accepted raw
+// input types (EXTRACTOR_ACCEPTED_INPUT_TYPES) — their observations only ever carry
+// pre-resolved candidates. In the deterministic pipeline (extraction-coordinator.ts)
+// a `candidates` input is now intercepted by the shared candidate-ingestion path
+// before any extractor id is dispatched to, so this function's `.candidates`
+// handling is never reached from a recorded observation (Issue 29). It stays here,
+// unchanged, for direct/offline callers (replay.ts, unit tests) that still invoke
+// `runExtractor` on a pre-resolved candidate list directly.
 const networkRequestUrls: ExtractorFn = (input) => {
   if (!input.candidates) return { status: 'empty', urls: [], rejectedCount: 0 };
   return finish(input.pageUrl, input.candidates);
@@ -177,6 +211,11 @@ const sitemapUrls: ExtractorFn = (input) => {
   return finish(input.pageUrl, candidates);
 };
 
+// SPA_ROUTE_URL_TOKENS_V1 accepts raw `scripts` only (EXTRACTOR_ACCEPTED_INPUT_TYPES).
+// It still falls back to `.candidates` for direct/offline callers (replay.ts, unit
+// tests); a recorded `candidates` observation from the deterministic pipeline is
+// intercepted by the shared candidate-ingestion path before dispatch (Issue 29), so
+// this branch is unreached from extraction-coordinator.ts.
 const spaRouteUrlTokens: ExtractorFn = (input) => {
   const fromScripts = input.scripts ? scanScriptsForPathTokens(input.scripts) : [];
   const fromCandidates = input.candidates ?? [];
