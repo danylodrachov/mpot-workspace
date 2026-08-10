@@ -8,6 +8,7 @@
 casino-evidence/
 
 # Live browser/session profiles and runtime state
+.casino-discovery/
 .runtime/
 .claude/skills/casino-website-scraping/runtime/chrome-profiles/
 .playwright-mcp/
@@ -64,6 +65,7 @@ bin/run-okb-e2e.ts
 bin/run-orc.ts
 bin/tracer.e2e-script.test.ts
 bin/tracer.filter.test.ts
+casino-evidence/
 
 # Non-casino-discovery docs
 docs/adr/

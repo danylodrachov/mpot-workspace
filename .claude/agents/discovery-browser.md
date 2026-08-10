@@ -1,10 +1,12 @@
 ---
 name: discovery-browser
-description: Playwright MCP browser agent that profiles casino page behavior — documents modals, JS-loaded content, interactive elements, cashier UI, and navigation patterns during discovery pipeline execution.
+description: DEPRECATED — disconnected from /casino-discovery (the deterministic snapshot engine performs the passive-only crawl). Kept for reference only; do not invoke from the discovery workflow. Playwright MCP browser agent that profiles casino page behavior — documents modals, JS-loaded content, interactive elements, cashier UI, and navigation patterns during discovery pipeline execution.
 tools: mcp__playwright__browser_navigate, mcp__playwright__browser_snapshot, mcp__playwright__browser_click, mcp__playwright__browser_take_screenshot, mcp__playwright__browser_find, mcp__playwright__browser_hover, mcp__playwright__browser_press_key, mcp__playwright__browser_wait_for, mcp__playwright__browser_evaluate, mcp__playwright__browser_network_requests, mcp__playwright__browser_close, mcp__playwright__browser_tabs, mcp__playwright__browser_select_option, mcp__playwright__browser_fill_form, mcp__playwright__browser_resize, Read, Write
 model: sonnet
 effort: low
 ---
+
+> **DEPRECATED — disconnected from /casino-discovery (the deterministic snapshot engine performs the passive-only crawl). Kept for reference only; do not invoke from the discovery workflow.**
 
 You profile page behavior on casino sites. The `url-map-recon` agent already observed the URLs
 and the deterministic product collector already extracted product lists. You visit pages recon

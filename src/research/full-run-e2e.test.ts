@@ -288,41 +288,37 @@ test("e2e: no deterministic module reaches a browser or the network", () => {
   }
 });
 
-test("e2e: the launcher skill documents bootstrap -> observe -> dispatch and invokes the browser agents only as observation producers", () => {
+test("e2e: the launcher skill documents the deterministic snapshot crawl and retires the scoring branch", () => {
   const skillPath = path.join(import.meta.dirname, "..", "..", ".claude", "skills", "casino-discovery", "SKILL.md");
   const text = fs.readFileSync(skillPath, "utf-8");
 
-  assert.ok(/url-field-relevance-scorer/i.test(text), "skill must reference the relevance scorer");
+  // The skill is a thin launcher over the deterministic crawler: it never collects
+  // evidence itself and never opens its own browser.
+  assert.ok(/casino-discovery:chrome/.test(text), "skill must name the dedicated Chrome launcher");
+  assert.ok(/casino-discovery:crawl/.test(text), "skill must run the deterministic crawler");
+  assert.ok(/CASINO_DISCOVERY_CDP_URL/.test(text), "skill must attach over CDP to the authenticated Chrome");
+  assert.ok(!/Playwright MCP(?![^\n]*[Dd]o not)/.test(text.replace(/Do not call Playwright MCP[^\n]*/g, "")),
+    "skill must not collect evidence through Playwright MCP");
 
-  // The three phases must be documented in order: bootstrap the run dir, record
-  // observations into it, then dispatch the stages against that same run.
-  const bootstrapAt = text.search(/initializeRun\(\)/);
-  const observeAt = text.search(/url-map-recon/i);
-  const dispatchAt = text.search(/stageDispatcher\(\)/);
-  assert.ok(bootstrapAt >= 0, "skill must name initializeRun() as the bootstrap step");
-  assert.ok(observeAt >= 0, "skill must name url-map-recon as an observation producer");
-  assert.ok(dispatchAt >= 0, "skill must name stageDispatcher() as the dispatch step");
-  assert.ok(bootstrapAt < observeAt, "bootstrap must be documented before the observe phase");
-  assert.ok(observeAt < dispatchAt, "observe phase must be documented before dispatch");
+  // The phases must be documented in order: crawl, verify terminal coverage, then review.
+  const crawlAt = text.search(/casino-discovery:crawl/);
+  const manifestAt = text.search(/run-manifest\.json/);
+  const reviewAt = text.search(/Invoke `discovery-reviewer`/i);
+  assert.ok(crawlAt >= 0 && manifestAt > crawlAt, "manifest check must follow the crawl");
+  assert.ok(reviewAt > manifestAt, "review must run only after the crawl and its coverage check");
 
-  // Both browser agents are invoked, and both are pointed at the bootstrapped run dir.
-  assert.ok(/discovery-browser/i.test(text), "skill must name discovery-browser as an observation producer");
-  assert.ok(/output_dir/.test(text), "skill must set output_dir for the browser agents");
-  assert.ok(/existingRunDir/.test(text), "skill must attach dispatch to the bootstrapped run dir");
+  // Every accepted URL must terminate; the reviewer runs post-run only.
+  assert.ok(/visited.*failed|failed.*visited/i.test(text), "skill must require a terminal visited/failed record");
+  assert.ok(/passive/i.test(text), "skill must state the crawl is passive-only");
 
-  // The blanket prohibition is gone; the narrower rule replaces it.
-  assert.ok(!/do not invoke[^\n]*url-map-recon/i.test(text), "skill must no longer forbid url-map-recon outright");
+  // The retired scoring/visit-planning branch must stay disconnected.
+  for (const retired of ["url-field relevance scorer", "relevance validator", "visit planner", "gap runner"]) {
+    assert.ok(new RegExp(retired, "i").test(text), `skill must explicitly retire the ${retired}`);
+  }
   assert.ok(
-    /only as observation producers/i.test(text),
-    "skill must state the browser agents are invoked only as observation producers",
+    /never invoke or restore/i.test(text),
+    "skill must forbid restoring the retired scoring/visit-planning components",
   );
-  assert.ok(
-    /never produce a canonical pipeline artifact/i.test(text),
-    "skill must state the browser agents never produce a canonical artifact",
-  );
-
-  // discovery-reviewer stays forbidden outright.
-  assert.ok(/do not invoke[^\n]*discovery-reviewer/i.test(text), "skill must explicitly forbid discovery-reviewer");
 });
 
 test("e2e: every hook command registered in settings.json resolves to an existing file", () => {

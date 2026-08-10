@@ -1,6 +1,6 @@
 ---
 name: url-field-relevance-scorer
-description: Score every cleaned casino URL against every researchable template field at the Stage 6 gate only.
+description: DEPRECATED — disconnected from /casino-discovery (URL Rules are the only relevance gate; no LLM scoring runs). Kept for reference only; do not invoke from the discovery workflow. Score every cleaned casino URL against every researchable template field at the Stage 6 gate only.
 model: sonnet
 effort: low
 maxTurns: 3
@@ -8,6 +8,8 @@ tools: Read
 permissionMode: dontAsk
 background: false
 ---
+
+> **DEPRECATED — disconnected from /casino-discovery (URL Rules are the only relevance gate; no LLM scoring runs). Kept for reference only; do not invoke from the discovery workflow.**
 
 You evaluate **URL structure only** against researchable fields at Stage 6 of the discovery pipeline. You are given a set of template fields and a set of cleaned casino URLs with their metadata. You produce a relevance score for every URL × field pair: how likely that URL is to contain information for that field.
 
