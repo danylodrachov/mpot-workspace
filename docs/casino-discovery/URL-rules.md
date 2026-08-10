@@ -18,6 +18,9 @@ Keep:
 - `/promo`
 - `/offers`
 - `/offers-*`
+- `/promotions` — deterministic alias of this class
+- `/promotions/<category>` — deterministic alias of this class
+- `/promotions/<category>/<offer-slug>` — deterministic alias of this class
 
 ---
 
@@ -70,15 +73,34 @@ Remove:
 
 ---
 
+## Locale Prefixes
+
+An optional single locale segment (e.g. `/en/`, `/en-GB/`, `/pt-BR/`) at the start of a path
+is normalized away before route classification, so localized and non-localized aliases of the
+same route classify identically:
+
+```
+/en/payments   → rule path /payments
+/en/rules      → rule path /rules
+/en/live-casino → rule path /live-casino
+```
+
+The original localized URL is always preserved as the browser navigation target — only the
+rule-matching path is locale-stripped, never the stored/visited URL.
+
+---
+
 ## Product Categories
 
-Keep only canonical category landing pages.
+Keep only canonical category landing pages. Casino sites express the same category either
+nested under `/casino/<category>` or as a bare top-level route; both shapes are equivalent
+and canonicalize to `/casino/<category>`.
 
 Examples:
 
-- `/casino/slots`
-- `/casino/live-casino`
-- `/casino/virtual-sports`
+- `/casino/slots` and `/slots`
+- `/casino/live-casino` and `/live-casino`
+- `/casino/virtual-sports` and `/virtual-sports`
 - `/horse-racing`
 - `/football`
 - `/tennis`
@@ -103,6 +125,24 @@ Never keep:
 - competitions
 - individual events
 - individual games
+
+---
+
+## Sports Category Roots (`/sport/<category>`)
+
+Sports category roots may also be expressed as `/sport/<category>`. The category root is kept;
+any nested league/event/tournament depth normalizes to the category root, never to the leaf page.
+
+Examples:
+
+```
+/sport/football                              → /sport/football (kept as-is)
+/sport/football/england/premier-league       → /sport/football
+/sport/basketball/north-america/nba          → /sport/basketball
+```
+
+Individual game/event/match pages remain rejected wherever they appear outside this
+normalization (e.g. `/game/<slug>`, `/event/<id>`).
 
 ---
 

@@ -3,7 +3,7 @@ import type { CandidateProvenance, UrlDecisionRecord } from './types.ts';
 export const URL_RULES_VERSION = 'url-rules-2026-08-10-passive-crawl-v1';
 
 const DOCUMENT_KEEP_PATTERNS: Array<{ id: string; re: RegExp; reason: string }> = [
-  { id: 'URLR_KEEP_BONUS', re: /^\/(?:bonuses|promo|offers(?:-[^/]+)?)\/?$/i, reason: 'Bonus/promotion document route.' },
+  { id: 'URLR_KEEP_BONUS', re: /^\/(?:bonuses|promo|offers(?:-[^/]+)?|promotions(?:\/[^/]+){0,2})\/?$/i, reason: 'Bonus/promotion document route (promotions is a deterministic alias of this class).' },
   { id: 'URLR_KEEP_PAYMENT', re: /^\/(?:deposit|withdraw|payment-methods|payments)\/?$/i, reason: 'Payment information route.' },
   { id: 'URLR_KEEP_LIMITS', re: /^\/(?:bet-limits|deposit-limits|loss-limits|time-limits)\/?$/i, reason: 'Limits information route.' },
   { id: 'URLR_KEEP_RULES', re: /^\/(?:terms-and-conditions(?:-[^/]+)?|bonus-terms|rules|sports-rules|casino-rules|live-casino-rules)\/?$/i, reason: 'Rules/terms route.' },
@@ -42,11 +42,39 @@ function normalizePath(pathname: string): string {
   return value || '/';
 }
 
-function canonicalProductCategory(url: URL): { url: URL; ruleId: string; reason: string } | undefined {
-  const path = normalizePath(url.pathname);
-  if (/^\/casino\/(?:slots|live-casino|virtual-sports)$/i.test(path)) {
+// Strips a single leading locale segment (e.g. /en/, /en-GB/) so that route
+// classification is locale-agnostic. Applied purely for matching/canonical
+// purposes; the original URL is always preserved in the decision record.
+const LOCALE_PREFIX_RE = /^\/[a-z]{2}(?:-[a-z]{2})?(?=\/|$)/i;
+
+function stripLocalePrefix(path: string): string {
+  const match = path.match(LOCALE_PREFIX_RE);
+  if (!match) return path;
+  const rest = path.slice(match[0].length);
+  return rest === '' ? '/' : rest;
+}
+
+// FIX-03: exposes the same locale segment stripLocalePrefix() consumes internally, so callers
+// outside this module (crawler.ts's route-identity/alias-merge logic) can tell which resolved
+// URL among several locale aliases actually carries a given locale, without reimplementing
+// locale-prefix parsing.
+export function extractLocale(pathname: string): string | undefined {
+  const match = pathname.match(LOCALE_PREFIX_RE);
+  if (!match) return undefined;
+  return match[0].slice(1).toLowerCase();
+}
+
+// Product categories real casino sites expose either nested under /casino/<x> or as a bare
+// top-level route (e.g. /casino/live-casino and /live-casino both mean the same landing page).
+// Both shapes canonicalize to the /casino/<x> form.
+function canonicalProductCategory(path: string, url: URL): { url: URL; ruleId: string; reason: string } | undefined {
+  const casinoNested = path.match(/^\/casino\/(slots|live-casino|virtual-sports)$/i);
+  const casinoBare = path.match(/^\/(slots|live-casino|virtual-sports)$/i);
+  if (casinoNested || casinoBare) {
+    const category = (casinoNested ?? casinoBare)![1]!.toLowerCase();
     const out = new URL(url.href);
-    out.pathname = path;
+    out.pathname = `/casino/${category}`;
+    out.search = '';
     out.hash = '';
     return { url: out, ruleId: 'URLR_KEEP_CASINO_CATEGORY', reason: 'Canonical casino product-category landing.' };
   }
@@ -56,6 +84,25 @@ function canonicalProductCategory(url: URL): { url: URL; ruleId: string; reason:
     out.pathname = path;
     out.hash = '';
     return { url: out, ruleId: 'URLR_KEEP_SPORT_CATEGORY', reason: 'Canonical sports category landing.' };
+  }
+
+  // /sport/<category>[/<nested...>] — a real casino site's sports category root, possibly
+  // followed by league/event navigation depth that must collapse to the category root.
+  const sportMatch = path.match(/^\/sport\/([^/]+)(?:\/.*)?$/i);
+  if (sportMatch) {
+    const category = sportMatch[1]!;
+    const isRootOnly = path.toLowerCase() === `/sport/${category.toLowerCase()}`;
+    const out = new URL(url.href);
+    out.pathname = `/sport/${category}`;
+    out.search = '';
+    out.hash = '';
+    return {
+      url: out,
+      ruleId: isRootOnly ? 'URLR_KEEP_SPORT_CATEGORY' : 'URLR_KEEP_SPORT_CATEGORY_NORMALIZED',
+      reason: isRootOnly
+        ? 'Canonical sports category landing.'
+        : 'Nested sports route (league/event/tournament depth) normalized to canonical category root.',
+    };
   }
 
   const segments = path.split('/').filter(Boolean);
@@ -122,6 +169,8 @@ export function decideUrl(
   }
 
   resolved.pathname = normalizePath(resolved.pathname);
+  const routePath = stripLocalePrefix(resolved.pathname);
+  const locale = extractLocale(resolved.pathname);
 
   if (resolved.hash) {
     return {
@@ -147,7 +196,7 @@ export function decideUrl(
     };
   }
 
-  const product = canonicalProductCategory(resolved);
+  const product = canonicalProductCategory(routePath, resolved);
   if (product) {
     return {
       rawUrl,
@@ -157,26 +206,37 @@ export function decideUrl(
       decision: 'accepted',
       ruleId: product.ruleId,
       reason: product.reason,
+      locale,
       provenance,
     };
   }
 
   for (const rule of DOCUMENT_KEEP_PATTERNS) {
-    if (rule.re.test(resolved.pathname)) {
+    if (rule.re.test(routePath)) {
+      // FIX-03: canonical route identity is locale-agnostic (built from routePath, the
+      // locale-stripped path) so /payments and /en/payments resolve to the same canonicalUrl
+      // and merge into one accepted target downstream. resolvedUrl still preserves the real
+      // localized URL as the actual navigation target candidate.
+      const canonical = new URL(resolved.href);
+      canonical.pathname = routePath;
+      canonical.search = '';
+      canonical.hash = '';
       return {
         rawUrl,
         resolvedUrl: resolved.href,
-        canonicalUrl: resolved.href,
+        canonicalUrl: canonical.href,
+        normalizedFrom: canonical.href !== resolved.href ? resolved.href : undefined,
         decision: 'accepted',
         ruleId: rule.id,
         reason: rule.reason,
+        locale,
         provenance,
       };
     }
   }
 
   for (const rule of DROP_PATTERNS) {
-    if (rule.re.test(resolved.pathname)) {
+    if (rule.re.test(routePath)) {
       return {
         rawUrl,
         resolvedUrl: resolved.href,
@@ -190,7 +250,7 @@ export function decideUrl(
   }
 
   for (const rule of TBD_PATTERNS) {
-    if (rule.re.test(resolved.pathname)) {
+    if (rule.re.test(routePath)) {
       return {
         rawUrl,
         resolvedUrl: resolved.href,
@@ -207,9 +267,9 @@ export function decideUrl(
     rawUrl,
     resolvedUrl: resolved.href,
     canonicalUrl: resolved.href,
-    decision: 'accepted',
-    ruleId: 'URLR_KEEP_UNMATCHED_SAME_ORIGIN',
-    reason: 'Same-domain route is not covered by an approved hard-drop rule; retain for complete deterministic visit coverage.',
+    decision: 'rejected',
+    ruleId: 'URLR_REJECT_UNCLASSIFIED_SAME_ORIGIN',
+    reason: 'Same-domain route is not covered by any approved keep, drop, or TBD rule; unclassified routes are not visited.',
     provenance,
   };
 }

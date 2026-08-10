@@ -9,6 +9,30 @@ import type {
 const MAX_ELEMENTS_PER_FRAME = 5_000;
 const MAX_NAME_LENGTH = 240;
 
+// FIX-04: same loading-indicator selector/visibility semantics as the `loadingIndicatorCandidates`
+// runtime signal computed inside `collectFrameElements` below — kept as one shared constant/
+// helper so the deterministic settle routine in page-capture.ts observes the exact same
+// "is a visible loading indicator present" concept as the passive trace, rather than a second,
+// possibly-diverging detector.
+const LOADING_INDICATOR_SELECTOR = '[aria-busy="true"], [role="progressbar"], .spinner, .loading, .skeleton';
+
+// FIX-04: lightweight, main-frame-only, passive-only probe reused by page-capture.ts's bounded
+// settle poll loop. Deliberately does not walk every frame or build the full interactive-element
+// inventory (that's collectPassiveInteractivity's job) — it only answers "is a visible loading
+// indicator present right now", cheaply enough to call on every settle poll tick.
+export async function hasVisibleLoadingIndicator(page: Page): Promise<boolean> {
+  return page.evaluate((selector: string) => {
+    const isVisible = (el: Element): boolean => {
+      if (!(el instanceof HTMLElement)) return true;
+      const style = getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+    return Array.from(document.querySelectorAll(selector)).some(isVisible);
+  }, LOADING_INDICATOR_SELECTOR);
+}
+
 async function collectFrameElements(frame: Frame): Promise<{
   interactive: InteractiveElementTrace[];
   overlays: VisibleOverlayTrace[];

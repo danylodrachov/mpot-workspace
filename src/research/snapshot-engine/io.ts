@@ -1,9 +1,17 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, rename, writeFile } from 'node:fs/promises';
+import { mkdir, rename, writeFile, appendFile } from 'node:fs/promises';
 import path from 'node:path';
 
 export async function ensureDir(dir: string): Promise<void> {
   await mkdir(dir, { recursive: true });
+}
+
+// Appends one JSON record as a single line. Callers must serialize their own calls per file
+// (Node's fs.appendFile does not guarantee ordering across concurrent callers) so that a
+// crash mid-run still leaves only complete, newline-terminated JSON records behind.
+export async function appendJsonLine(filePath: string, value: unknown): Promise<void> {
+  await ensureDir(path.dirname(filePath));
+  await appendFile(filePath, `${JSON.stringify(value)}\n`, 'utf8');
 }
 
 export async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> {

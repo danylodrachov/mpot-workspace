@@ -5,9 +5,53 @@ import type { RawUrlCandidate, SourceFamily } from './types.ts';
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
 const TEXTUAL_CONTENT_TYPE = /(?:json|javascript|ecmascript|text\/|xml|svg)/i;
 
+// Deterministic deadlines: one stuck network response must never block the crawl.
+const RESPONSE_BODY_TIMEOUT_MS = 5_000;
+const FLUSH_DEADLINE_MS = 8_000;
+
+// FIX-07: batch-level deadlines for passive enrichment operations that otherwise loop over an
+// unbounded number of same-domain sources/pages with no overall bound. Reused (not duplicated)
+// by crawler.ts, which wraps the corresponding batch call with `withTimeout` using these values
+// (overridable per-call for tests).
+export const TEXT_SOURCE_BATCH_TIMEOUT_MS = 30_000;
+export const ROBOTS_SITEMAP_BATCH_TIMEOUT_MS = 20_000;
+
+export class TimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TimeoutError';
+  }
+}
+
+export async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new TimeoutError(message)), timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// FIX-06: an extractor's run outcome for one source family, distinct from per-candidate
+// errors. 'error' status is still driven by sink.error() (kept separate so every existing
+// error call site continues to work unmodified); this covers the non-error terminal states
+// an extractor can explicitly declare once it actually ran.
+export type SourceRunStatus = 'complete' | 'absent' | 'blocked' | 'unsupported';
+
+export interface SourceRunOutcome {
+  status: SourceRunStatus;
+  durationMs?: number;
+}
+
 export interface DiscoverySink {
   add(candidate: RawUrlCandidate): void;
   error(sourceFamily: SourceFamily, message: string): void;
+  // Called by an extractor exactly once per invocation once it has actually run, so
+  // coverage reporting never has to *infer* completion merely from "no exception thrown".
+  recordRun(sourceFamily: SourceFamily, outcome: SourceRunOutcome): void;
 }
 
 function normalizeCandidateToken(value: string): string {
@@ -15,6 +59,7 @@ function normalizeCandidateToken(value: string): string {
 }
 
 async function extractFrameDom(frame: Frame, sink: DiscoverySink): Promise<void> {
+  const startedAt = Date.now();
   try {
     const rows = await frame.evaluate(() => {
       const out: Array<{ value: string; attribute: string; label?: string }> = [];
@@ -62,12 +107,17 @@ async function extractFrameDom(frame: Frame, sink: DiscoverySink): Promise<void>
         },
       });
     }
+    const durationMs = Date.now() - startedAt;
+    sink.recordRun('dom_url_attribute', { status: 'complete', durationMs });
+    sink.recordRun('document_metadata', { status: 'complete', durationMs });
   } catch (error) {
     sink.error('dom_url_attribute', `DOM URL extraction failed on frame ${frame.url()}: ${error instanceof Error ? error.message : String(error)}`);
+    sink.error('document_metadata', `DOM URL extraction failed on frame ${frame.url()}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
 async function extractInlineScriptTokens(frame: Frame, sink: DiscoverySink): Promise<void> {
+  const startedAt = Date.now();
   try {
     const tokens = await frame.evaluate(() => {
       const out = new Set<string>();
@@ -98,12 +148,14 @@ async function extractInlineScriptTokens(frame: Frame, sink: DiscoverySink): Pro
         },
       });
     }
+    sink.recordRun('inline_script_url_token', { status: 'complete', durationMs: Date.now() - startedAt });
   } catch (error) {
     sink.error('inline_script_url_token', `Inline script scan failed on frame ${frame.url()}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
 async function extractPerformance(page: Page, sink: DiscoverySink): Promise<void> {
+  const startedAt = Date.now();
   try {
     const urls = await page.evaluate(() => performance.getEntriesByType('resource').map((entry) => entry.name));
     for (const url of urls) {
@@ -112,13 +164,16 @@ async function extractPerformance(page: Page, sink: DiscoverySink): Promise<void
         provenance: { sourceFamily: 'performance_resource', discoveredOn: page.url(), sourceUrl: page.url() },
       });
     }
+    sink.recordRun('performance_resource', { status: 'complete', durationMs: Date.now() - startedAt });
   } catch (error) {
     sink.error('performance_resource', `Performance API scan failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
 export async function discoverFromPage(page: Page, sink: DiscoverySink): Promise<void> {
-  for (const frame of page.frames()) {
+  const startedAt = Date.now();
+  const frames = page.frames();
+  for (const frame of frames) {
     sink.add({
       rawUrl: frame.url(),
       provenance: { sourceFamily: 'frame_url', discoveredOn: page.url(), sourceUrl: page.url(), label: frame.name() || undefined },
@@ -126,6 +181,7 @@ export async function discoverFromPage(page: Page, sink: DiscoverySink): Promise
     await extractFrameDom(frame, sink);
     await extractInlineScriptTokens(frame, sink);
   }
+  sink.recordRun('frame_url', { status: 'complete', durationMs: Date.now() - startedAt });
   await extractPerformance(page, sink);
 }
 
@@ -136,6 +192,7 @@ function hostnameInScope(hostname: string, allowedHostname: string): boolean {
 }
 
 async function scanResponseBody(response: Response, sink: DiscoverySink, allowedHostname: string): Promise<void> {
+  const startedAt = Date.now();
   try {
     const url = new URL(response.url());
     if (!hostnameInScope(url.hostname, allowedHostname)) return;
@@ -144,10 +201,16 @@ async function scanResponseBody(response: Response, sink: DiscoverySink, allowed
     if (!TEXTUAL_CONTENT_TYPE.test(contentType)) return;
     const declaredLength = Number(headers['content-length'] ?? '0');
     if (declaredLength > MAX_BODY_BYTES) return;
-    const body = await response.body();
+    const body = await withTimeout(
+      response.body(),
+      RESPONSE_BODY_TIMEOUT_MS,
+      `Response body scan exceeded ${RESPONSE_BODY_TIMEOUT_MS}ms deadline for ${response.url()}`,
+    );
     if (body.byteLength > MAX_BODY_BYTES) return;
     const text = body.toString('utf8');
+    let tokenCount = 0;
     for (const token of scanUrlTokens(text, { maxTokens: 20_000 })) {
+      tokenCount += 1;
       sink.add({
         rawUrl: token,
         provenance: {
@@ -157,7 +220,14 @@ async function scanResponseBody(response: Response, sink: DiscoverySink, allowed
         },
       });
     }
+    sink.recordRun('network_body_url_token', {
+      status: tokenCount > 0 ? 'complete' : 'absent',
+      durationMs: Date.now() - startedAt,
+    });
   } catch (error) {
+    // FIX-01: a response-body scan that blows through its bounded deadline (or otherwise
+    // throws) must surface as an explicit 'error' terminal state for network_body_url_token
+    // — never silently resolve as an empty success.
     sink.error('network_body_url_token', `Response body scan failed for ${response.url()}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
@@ -180,11 +250,13 @@ export class PassiveNetworkObserver {
   private readonly page: Page;
   private readonly sink: DiscoverySink;
   private readonly allowedHostname: string;
+  private readonly flushDeadlineMs: number;
 
-  constructor(page: Page, sink: DiscoverySink, allowedHostname: string) {
+  constructor(page: Page, sink: DiscoverySink, allowedHostname: string, flushDeadlineMs: number = FLUSH_DEADLINE_MS) {
     this.page = page;
     this.sink = sink;
     this.allowedHostname = allowedHostname;
+    this.flushDeadlineMs = flushDeadlineMs;
   }
 
   start(): void {
@@ -205,6 +277,7 @@ export class PassiveNetworkObserver {
         sourceUrl: request.url(),
       },
     });
+    this.sink.recordRun('network_request', { status: 'complete' });
   };
 
   private readonly onResponse = (response: Response) => {
@@ -221,6 +294,7 @@ export class PassiveNetworkObserver {
         sourceUrl: response.url(),
       },
     });
+    this.sink.recordRun('network_response', { status: 'complete' });
     const task = scanResponseBody(response, this.sink, this.allowedHostname).finally(() => this.pending.delete(task));
     this.pending.add(task);
   };
@@ -243,7 +317,20 @@ export class PassiveNetworkObserver {
   };
 
   async flush(): Promise<void> {
-    await Promise.allSettled([...this.pending]);
+    const pendingCount = this.pending.size;
+    if (pendingCount === 0) return;
+    const settled = Promise.allSettled([...this.pending]);
+    const outcome = await Promise.race([
+      settled.then(() => 'completed' as const),
+      new Promise<'timed-out'>((resolve) => setTimeout(() => resolve('timed-out'), this.flushDeadlineMs)),
+    ]);
+    if (outcome === 'timed-out') {
+      const stillPending = this.pending.size;
+      this.sink.error(
+        'network_body_url_token',
+        `PassiveNetworkObserver.flush() exceeded ${this.flushDeadlineMs}ms deadline with ${stillPending}/${pendingCount} response-body task(s) still pending; continuing without waiting further`,
+      );
+    }
   }
 
   stop(): void {
@@ -272,10 +359,15 @@ export async function discoverRobotsAndSitemaps(
 ): Promise<void> {
   const sitemapQueue: string[] = [];
   const seenSitemaps = new Set<string>();
+  const robotsStartedAt = Date.now();
   try {
     const robotsUrl = new URL('/robots.txt', allowedOrigin).href;
     const robots = await fetchText(context, robotsUrl);
-    if (robots.text) {
+    if (robots.status === 403) {
+      sink.recordRun('robots_sitemap', { status: 'blocked', durationMs: Date.now() - robotsStartedAt });
+    } else if (!robots.text || robots.status === 404) {
+      sink.recordRun('robots_sitemap', { status: 'absent', durationMs: Date.now() - robotsStartedAt });
+    } else {
       for (const line of robots.text.split(/\r?\n/)) {
         const match = /^\s*Sitemap:\s*(\S+)/i.exec(line);
         if (match?.[1]) {
@@ -286,6 +378,7 @@ export async function discoverRobotsAndSitemaps(
       for (const token of scanUrlTokens(robots.text, { maxTokens: 10_000 })) {
         sink.add({ rawUrl: token, provenance: { sourceFamily: 'robots_sitemap', discoveredOn: robotsUrl, sourceUrl: robotsUrl } });
       }
+      sink.recordRun('robots_sitemap', { status: 'complete', durationMs: Date.now() - robotsStartedAt });
     }
   } catch (error) {
     sink.error('robots_sitemap', `robots.txt fetch failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -293,21 +386,40 @@ export async function discoverRobotsAndSitemaps(
 
   sitemapQueue.push(new URL('/sitemap.xml', allowedOrigin).href);
 
+  const sitemapStartedAt = Date.now();
+  let sitemapFoundAny = false;
+  let sitemapBlocked = false;
+  let sitemapAttempted = false;
+  let sitemapErrored = false;
   while (sitemapQueue.length > 0 && seenSitemaps.size < 100) {
     const sitemapUrl = sitemapQueue.shift()!;
     if (seenSitemaps.has(sitemapUrl)) continue;
     seenSitemaps.add(sitemapUrl);
+    sitemapAttempted = true;
     try {
       const response = await fetchText(context, sitemapUrl);
+      if (response.status === 403) {
+        sitemapBlocked = true;
+        continue;
+      }
       if (!response.text || response.status >= 400) continue;
       const locs = [...response.text.matchAll(/<loc>\s*([^<]+?)\s*<\/loc>/gi)].map((match) => match[1]!.replace(/&amp;/g, '&'));
+      if (locs.length > 0) sitemapFoundAny = true;
       for (const loc of locs) {
         sink.add({ rawUrl: loc, provenance: { sourceFamily: 'sitemap_url', discoveredOn: sitemapUrl, sourceUrl: sitemapUrl } });
         if (/\.xml(?:\.gz)?(?:$|\?)/i.test(loc)) sitemapQueue.push(loc);
       }
     } catch (error) {
+      sitemapErrored = true;
       sink.error('sitemap_url', `Sitemap fetch failed for ${sitemapUrl}: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+  if (!sitemapErrored) {
+    const durationMs = Date.now() - sitemapStartedAt;
+    if (sitemapFoundAny) sink.recordRun('sitemap_url', { status: 'complete', durationMs });
+    else if (sitemapBlocked) sink.recordRun('sitemap_url', { status: 'blocked', durationMs });
+    else if (sitemapAttempted) sink.recordRun('sitemap_url', { status: 'absent', durationMs });
+    else sink.recordRun('sitemap_url', { status: 'unsupported', durationMs });
   }
 }
 
@@ -319,18 +431,32 @@ export async function scanSameDomainTextSources(
   alreadyScanned = new Set<string>(),
 ): Promise<void> {
   const seen = alreadyScanned;
+  const startedAt = Date.now();
+  let attempted = false;
+  let foundExternalScript = false;
+  let foundBodyToken = false;
+  let erroredExternalScript = false;
+  let erroredBodyToken = false;
   for (const sourceUrl of sourceUrls.sort()) {
     if (seen.has(sourceUrl)) continue;
     seen.add(sourceUrl);
+    let url: URL;
     try {
-      const url = new URL(sourceUrl);
-      if (!hostnameInScope(url.hostname, allowedHostname)) continue;
+      url = new URL(sourceUrl);
+    } catch {
+      continue;
+    }
+    if (!hostnameInScope(url.hostname, allowedHostname)) continue;
+    attempted = true;
+    const family: SourceFamily = /\.(?:js|mjs)(?:$|\?)/i.test(url.pathname)
+      ? 'external_script_url_token'
+      : 'network_body_url_token';
+    try {
       const response = await fetchText(context, url.href);
       if (!response.text || response.status >= 400) continue;
-      const family: SourceFamily = /\.(?:js|mjs)(?:$|\?)/i.test(url.pathname)
-        ? 'external_script_url_token'
-        : 'network_body_url_token';
+      let tokenCount = 0;
       for (const token of scanUrlTokens(response.text, { maxTokens: 20_000 })) {
+        tokenCount += 1;
         sink.add({
           rawUrl: token,
           provenance: {
@@ -340,8 +466,28 @@ export async function scanSameDomainTextSources(
           },
         });
       }
+      if (tokenCount > 0) {
+        if (family === 'external_script_url_token') foundExternalScript = true;
+        else foundBodyToken = true;
+      }
     } catch (error) {
+      if (family === 'external_script_url_token') erroredExternalScript = true;
+      else erroredBodyToken = true;
       sink.error('network_body_url_token', `Text source scan failed for ${sourceUrl}: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+
+  const durationMs = Date.now() - startedAt;
+  if (!erroredExternalScript) {
+    sink.recordRun('external_script_url_token', {
+      status: !attempted ? 'unsupported' : foundExternalScript ? 'complete' : 'absent',
+      durationMs,
+    });
+  }
+  if (!erroredBodyToken) {
+    sink.recordRun('network_body_url_token', {
+      status: !attempted ? 'unsupported' : foundBodyToken ? 'complete' : 'absent',
+      durationMs,
+    });
   }
 }

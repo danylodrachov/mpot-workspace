@@ -20,14 +20,36 @@
     "/casino/live-casino",
     "/casino/virtual-sports",
     "/horse-racing",
-    "/licenses",
-    "/mobile"
+    "/en/casino/slots",
+    "/en/deposit",
+    "/live-casino",
+    "/virtual-sports",
+    "/en/live-casino",
+    "/en/virtual-sports",
+    "/promotions",
+    "/en/promotions",
+    "/promotions/casino/daily-cashback-15",
+    "/en/promotions/casino/daily-cashback-15",
+    "/promotions/sports",
+    "/sport/football",
+    "/sport/basketball",
+    "/en/sport/football",
+    "/fr/sport/tennis"
   ],
   "normalized": {
     "/football/live": "/football",
     "/football/prematch": "/football",
     "/tennis/live": "/tennis",
-    "/basketball/prematch": "/basketball"
+    "/basketball/prematch": "/basketball",
+    "/en/football/live": "/football",
+    "/en-GB/football/prematch": "/football",
+    "/live-casino": "/casino/live-casino",
+    "/virtual-sports": "/casino/virtual-sports",
+    "/en/live-casino": "/casino/live-casino",
+    "/sport/football/england/premier-league": "/sport/football",
+    "/sport/basketball/north-america/nba": "/sport/basketball",
+    "/en/sport/football/england/premier-league": "/sport/football",
+    "/fr/sport/basketball/north-america/nba": "/sport/basketball"
   },
   "rejected": [
     "/",
@@ -56,7 +78,13 @@
     "/casino/slots/individual-game",
     "/game/individual-game",
     "/event/123",
-    "/league/premier-league"
+    "/league/premier-league",
+    "/licenses",
+    "/mobile",
+    "/en/casino/lobby",
+    "/en/privacy-policy",
+    "/en/404",
+    "/en-GB/404"
   ],
   "tbd": [
     "/api/casino",
@@ -67,6 +95,7 @@
     "/register",
     "/status",
     "/offers?lang=en",
-    "/offers#current"
+    "/offers#current",
+    "/en/login"
   ]
 }
