@@ -2,10 +2,12 @@ import path from 'node:path';
 import type { BrowserContext, Frame, Page, Request, Response, WebSocket } from 'playwright';
 import { scanUrlTokens } from './token-scan.ts';
 import type { NetworkEvidenceRecord, RawUrlCandidate, SourceFamily } from './types.ts';
-import { DEFAULT_RUNTIME_BUDGETS } from './runtime-config.ts';
+import { DEFAULT_RUNTIME_BUDGETS, DEFAULT_NETWORK_EVIDENCE_LIMITS } from './runtime-config.ts';
 import { appendJsonLine, sha256, writeTextAtomic } from './io.ts';
 
-const MAX_BODY_BYTES = 10 * 1024 * 1024;
+// FIX-01: legacy fallback for the URL-token-only body scan below (scanResponseBody), which is
+// separate from CF-02's network-evidence capture path and has never taken a configurable limit.
+const MAX_BODY_BYTES = DEFAULT_NETWORK_EVIDENCE_LIMITS.maxBodyBytes;
 const TEXTUAL_CONTENT_TYPE = /(?:json|javascript|ecmascript|text\/|xml|svg)/i;
 
 // CD-N07: deterministic deadlines — one stuck network response must never block the crawl.
@@ -248,6 +250,10 @@ async function scanResponseBody(
 export interface NetworkEvidenceOptions {
   evidenceDir: string;
   evidenceIndexPath: string;
+  // FIX-01: configurable overrides, resolved by the caller via resolveNetworkEvidenceLimits() in
+  // runtime-config.ts; default to DEFAULT_NETWORK_EVIDENCE_LIMITS when omitted.
+  maxBodyBytes?: number;
+  maxRecordsPerPage?: number;
 }
 
 function contentTypeExtension(contentType: string | undefined): string {
@@ -274,10 +280,17 @@ async function captureNetworkEvidence(
   options: NetworkEvidenceOptions,
   bodyHashCache: Map<string, string>,
   timeoutMs: number,
+  // FIX-01: shared mutable counter of 'captured' records recorded so far for the CURRENT page
+  // visit (reset per PassiveNetworkObserver instance, which is itself one-per-page-visit — see
+  // crawler.ts). Passed by reference so concurrent in-flight capture tasks for the same page all
+  // observe/increment the same count rather than each starting from zero.
+  capturedCountRef: { count: number },
 ): Promise<void> {
   const request = response.request();
   const resourceType = request.resourceType();
   if (resourceType !== 'xhr' && resourceType !== 'fetch') return;
+  const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_NETWORK_EVIDENCE_LIMITS.maxBodyBytes;
+  const maxRecordsPerPage = options.maxRecordsPerPage ?? DEFAULT_NETWORK_EVIDENCE_LIMITS.maxRecordsPerPage;
 
   let url: URL;
   try {
@@ -305,6 +318,16 @@ async function captureNetworkEvidence(
     capturedAt,
   };
 
+  // FIX-01: hoisted above the inner try so the outer catch (below) can also release a reservation
+  // that was taken but never resolved into a 'captured' record due to an unexpected exception.
+  let reserved = false;
+  const releaseReservation = () => {
+    if (reserved) {
+      capturedCountRef.count -= 1;
+      reserved = false;
+    }
+  };
+
   try {
     if (status < 200 || status >= 300) {
       await appendNetworkEvidenceRecord(options.evidenceIndexPath, {
@@ -322,12 +345,30 @@ async function captureNetworkEvidence(
       });
       return;
     }
-    const declaredLength = Number(response.headers()['content-length'] ?? '0');
-    if (declaredLength > MAX_BODY_BYTES) {
+    // FIX-01: configurable per-page cap on the number of captured records. Reserved synchronously
+    // here (before any `await`, i.e. before this task or any concurrently-started sibling task for
+    // the same page yields to the event loop) so concurrent in-flight responses on one page can
+    // never all observe the same pre-increment count and jointly overshoot the cap. The reservation
+    // is released below if this response ultimately does not become a 'captured' record, so the
+    // cap always reflects actually-captured records, never merely-attempted ones.
+    if (capturedCountRef.count >= maxRecordsPerPage) {
       await appendNetworkEvidenceRecord(options.evidenceIndexPath, {
         ...baseRecord,
         outcome: 'skipped',
-        reason: `declared content-length ${declaredLength} exceeds ${MAX_BODY_BYTES} byte limit`,
+        reason: `page network-evidence capture limit of ${maxRecordsPerPage} record(s) already reached`,
+      });
+      return;
+    }
+    capturedCountRef.count += 1;
+    reserved = true;
+
+    const declaredLength = Number(response.headers()['content-length'] ?? '0');
+    if (declaredLength > maxBodyBytes) {
+      releaseReservation();
+      await appendNetworkEvidenceRecord(options.evidenceIndexPath, {
+        ...baseRecord,
+        outcome: 'skipped',
+        reason: `declared content-length ${declaredLength} exceeds ${maxBodyBytes} byte limit`,
       });
       return;
     }
@@ -340,6 +381,7 @@ async function captureNetworkEvidence(
         `Network evidence capture exceeded ${timeoutMs}ms deadline for ${requestUrl}`,
       );
     } catch (error) {
+      releaseReservation();
       const isTimeout = error instanceof TimeoutError;
       await appendNetworkEvidenceRecord(options.evidenceIndexPath, {
         ...baseRecord,
@@ -349,11 +391,12 @@ async function captureNetworkEvidence(
       return;
     }
 
-    if (body.byteLength > MAX_BODY_BYTES) {
+    if (body.byteLength > maxBodyBytes) {
+      releaseReservation();
       await appendNetworkEvidenceRecord(options.evidenceIndexPath, {
         ...baseRecord,
         outcome: 'skipped',
-        reason: `body ${body.byteLength} bytes exceeds ${MAX_BODY_BYTES} byte limit`,
+        reason: `body ${body.byteLength} bytes exceeds ${maxBodyBytes} byte limit`,
       });
       return;
     }
@@ -376,6 +419,7 @@ async function captureNetworkEvidence(
       outcome: 'captured',
     });
   } catch (error) {
+    releaseReservation();
     await appendNetworkEvidenceRecord(options.evidenceIndexPath, {
       ...baseRecord,
       outcome: 'error',
@@ -407,6 +451,10 @@ export class PassiveNetworkObserver {
   private readonly networkEvidence?: NetworkEvidenceOptions;
   // CF-02: dedupe identical response bodies by content hash within this run's observer lifetime.
   private readonly evidenceBodyHashCache = new Map<string, string>();
+  // FIX-01: count of 'captured' network-evidence records for the CURRENT page visit — one
+  // PassiveNetworkObserver instance per page visit (see crawler.ts), so this resets naturally on
+  // the next page's new observer instance.
+  private readonly evidenceCapturedCount = { count: 0 };
 
   constructor(
     page: Page,
@@ -471,6 +519,7 @@ export class PassiveNetworkObserver {
         this.networkEvidence,
         this.evidenceBodyHashCache,
         this.responseBodyTimeoutMs,
+        this.evidenceCapturedCount,
       ).finally(() => this.pending.delete(evidenceTask));
       this.pending.add(evidenceTask);
     }

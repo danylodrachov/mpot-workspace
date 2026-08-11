@@ -6,7 +6,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { crawlSite, SOURCE_FAMILIES } from './crawler.ts';
 import type { BrowserContext, Page } from 'playwright';
-import type { SourceCoverageRecord, SourceFamilyStatus } from './types.ts';
+import type { ReviewInputDocument, SourceCoverageRecord, SourceFamilyStatus } from './types.ts';
 
 // FIX-04: crawlSite must run terminal URL discovery/filtering to completion, freeze the
 // accepted-URL inventory, and only then visit each accepted URL exactly once. Passive
@@ -1053,10 +1053,7 @@ test('CF-02: a timed-out network evidence capture produces a terminal timeout re
 // CF-03: the deterministic review handoff must reference CF-02's network-evidence.jsonl by path
 // (never inline the captured bodies), and validate every 'captured' record's body file exists
 // before handing anything to the reviewer.
-function readReviewInput(runDir: string): {
-  schemaVersion: string;
-  networkEvidenceIndexPath?: string;
-} {
+function readReviewInput(runDir: string): ReviewInputDocument {
   const debugDir = path.join(runDir, 'debug');
   const candidate = fs.existsSync(debugDir)
     ? path.join(debugDir, 'review-input.json')
@@ -1075,11 +1072,15 @@ test('CF-03: a terminal run with captured network evidence assembles review-inpu
     const result = await originalGoto(url);
     if (!fired) {
       fired = true;
+      // FIX-01: the response's owning frame is the page actually navigated to by this goto()
+      // call (not necessarily the entry URL -- URL Rules may not accept the bare root), so the
+      // per-page network-evidence join below can match it against the real visited-page record.
       fireResponse(listeners, {
         url: 'https://example.test/api/v3/promotion/list?x=1',
         contentType: 'application/json',
         resourceType: 'xhr',
         body: async () => Buffer.from(JSON.stringify({ promotions: [{ name: 'Welcome Bonus' }] })),
+        pageUrl: page.url(),
       });
     }
     return result;
@@ -1102,12 +1103,32 @@ test('CF-03: a terminal run with captured network evidence assembles review-inpu
   assert.ok(fs.existsSync(networkEvidencePath), 'expected network-evidence.jsonl to exist for this run');
 
   const reviewInput = readReviewInput(runDir);
-  assert.equal(reviewInput.schemaVersion, '1.2');
+  assert.equal(reviewInput.schemaVersion, '1.4');
   assert.equal(
     reviewInput.networkEvidenceIndexPath,
     networkEvidencePath,
     'expected review-input.json to reference network-evidence.jsonl by path',
   );
+
+  // FIX-01: the visited page that produced the same-origin JSON xhr must carry a deterministic
+  // per-page reference to that network evidence (request URL + captured body reference), not just
+  // the run-level networkEvidenceIndexPath above. The response fired above is attributed to
+  // whichever accepted URL the crawl actually visits first (not necessarily the bare entryUrl,
+  // since URL Rules may not accept the root path as a visitable page) via page.url() above.
+  assert.equal(reviewInput.pageNetworkEvidence.length, 1);
+  const pageEvidence = reviewInput.pageNetworkEvidence[0]!;
+  assert.ok(
+    reviewInput.visitedPages.some(
+      (visited) => visited.status === 'visited' && visited.requestedUrl === pageEvidence.visitedPageRequestedUrl,
+    ),
+    'expected the per-page evidence entry to reference an actual visited page',
+  );
+  const promoRecord = pageEvidence.records.find(
+    (record) => record.requestUrl === 'https://example.test/api/v3/promotion/list?x=1',
+  );
+  assert.ok(promoRecord, 'expected a per-page network evidence record for the captured promotion-list xhr');
+  assert.equal(promoRecord?.outcome, 'captured');
+  assert.ok(promoRecord?.bodyPath, 'expected the per-page reference to carry the on-disk body path');
 
   const rawReviewInput = fs.readFileSync(
     fs.existsSync(path.join(runDir, 'debug')) ? path.join(runDir, 'debug', 'review-input.json') : path.join(runDir, 'review-input.json'),
@@ -1140,6 +1161,7 @@ test('CF-03: a run without any captured network traffic remains backward-compati
   assert.equal(fs.existsSync(path.join(runDir, 'network-evidence.jsonl')), false);
   const reviewInput = readReviewInput(runDir);
   assert.equal(reviewInput.networkEvidenceIndexPath, undefined);
+  assert.deepEqual(reviewInput.pageNetworkEvidence, []);
 });
 
 test('CF-03: a captured network-evidence record pointing at a missing body file fails the review gate', async () => {

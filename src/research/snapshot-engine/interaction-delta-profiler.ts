@@ -122,12 +122,14 @@ export function buildLocatorEvidence(el: InteractiveElementTrace): LocatorEviden
   return { strategy: 'dom_path_fallback', selector: el.domPath, role: el.role, name: el.name };
 }
 
-function isTimeoutError(error: unknown): boolean {
+// FIX-03: exported so bounded-reveal.ts (a categorically narrower, allowlist-only adapter set) can
+// reuse the exact same timeout classification instead of re-implementing it.
+export function isTimeoutError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return error.name === 'TimeoutError' || /timeout/i.test(error.message);
 }
 
-interface CapturedState {
+export interface CapturedState {
   url: string;
   html: string;
   contentHash: string;
@@ -154,7 +156,9 @@ async function countVisibleOverlays(page: Page): Promise<number> {
     .catch(() => 0);
 }
 
-async function captureState(page: Page, locator: Locator): Promise<CapturedState> {
+// FIX-03: exported for reuse by bounded-reveal.ts — same before/after state capture, no adapter-
+// specific behavior lives here.
+export async function captureState(page: Page, locator: Locator): Promise<CapturedState> {
   const url = page.url();
   const html = await page.content().catch(() => '');
   const [ariaExpanded, ariaSelected, overlayCount] = await Promise.all([
@@ -182,7 +186,8 @@ function revealedContainerSelectorFor(el: InteractiveElementTrace): string {
   return el.domPath;
 }
 
-function diffStates(before: CapturedState, after: CapturedState): InteractionDelta {
+// FIX-03: exported for reuse by bounded-reveal.ts.
+export function diffStates(before: CapturedState, after: CapturedState): InteractionDelta {
   return {
     contentChanged: before.contentHash !== after.contentHash,
     ariaExpandedBefore: before.ariaExpanded,
@@ -214,7 +219,8 @@ function classifyOutcome(delta: InteractionDelta): InteractionOutcome {
 
 // Bounded delta-settle: polls the shared passive loading-indicator probe (never a fixed sleep,
 // never `networkidle`) until either no visible loading indicator remains or the budget runs out.
-async function waitForDeltaSettle(page: Page, budgetMs: number, pollIntervalMs: number): Promise<void> {
+// FIX-03: exported for reuse by bounded-reveal.ts.
+export async function waitForDeltaSettle(page: Page, budgetMs: number, pollIntervalMs: number): Promise<void> {
   const deadline = Date.now() + Math.max(0, budgetMs);
   while (true) {
     const loading = await hasVisibleLoadingIndicator(page).catch(() => false);

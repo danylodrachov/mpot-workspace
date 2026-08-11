@@ -204,6 +204,68 @@ test('CD-N03: /sport/<category> roots only accept real sport names, not competit
   assert.equal(westaceDecide('https://ws43--westace.com/casino/live-casino/blackjack').decision, 'accepted');
 });
 
+test('FIX-04: /games/<category> is a generic alias of the canonical casino product-category landing', () => {
+  const bare = decide('/casino/slots');
+  const alias = decide('/games/slots');
+  assert.equal(alias.decision, 'accepted');
+  assert.equal(alias.ruleId, 'URLR_KEEP_CASINO_CATEGORY');
+  assert.equal(alias.canonicalUrl, bare.canonicalUrl);
+  assert.equal(alias.canonicalUrl, 'https://example.com/casino/slots');
+
+  const liveCasinoAlias = decide('/games/live-casino');
+  assert.equal(liveCasinoAlias.decision, 'accepted');
+  assert.equal(liveCasinoAlias.canonicalUrl, 'https://example.com/casino/live-casino');
+
+  const virtualSportsAlias = decide('/games/virtual-sports');
+  assert.equal(virtualSportsAlias.decision, 'accepted');
+  assert.equal(virtualSportsAlias.canonicalUrl, 'https://example.com/casino/virtual-sports');
+
+  // locale-prefixed variant
+  const localized = decide('/en/games/slots');
+  assert.equal(localized.decision, 'accepted');
+  assert.equal(localized.ruleId, 'URLR_KEEP_CASINO_CATEGORY');
+  assert.equal(localized.canonicalUrl, 'https://example.com/casino/slots');
+});
+
+test('FIX-04: /game/<slug> remains rejected as an individual game, with or without locale', () => {
+  assert.equal(decide('/game/some-slot').decision, 'rejected');
+  assert.equal(decide('/en/game/some-slot').decision, 'rejected');
+});
+
+test('FIX-04: /games/<unknown-slug> is not blindly accepted as a category', () => {
+  const result = decide('/games/some-random-slug');
+  assert.equal(result.decision, 'rejected');
+  assert.notEqual(result.ruleId, 'URLR_KEEP_CASINO_CATEGORY');
+
+  const localized = decide('/en/games/some-random-slug');
+  assert.equal(localized.decision, 'rejected');
+});
+
+test('FIX-04: public VIP/loyalty program landings are accepted under the new versioned rule class', () => {
+  for (const route of ['/vip', '/vip-club', '/loyalty', '/loyalty-program', '/rewards', '/rewards-program']) {
+    const result = decide(route);
+    assert.equal(result.decision, 'accepted', route);
+    assert.equal(result.ruleId, 'URLR_KEEP_LOYALTY_PROGRAM', route);
+  }
+
+  // locale-prefixed variants
+  for (const route of ['/en/vip', '/en/loyalty', '/fr/rewards']) {
+    const result = decide(route);
+    assert.equal(result.decision, 'accepted', route);
+    assert.equal(result.ruleId, 'URLR_KEEP_LOYALTY_PROGRAM', route);
+  }
+});
+
+test('FIX-04: account-scoped VIP/history nested routes remain rejected', () => {
+  assert.equal(decide('/account/vip').decision, 'rejected');
+  assert.equal(decide('/my-account/vip').decision, 'rejected');
+  assert.equal(decide('/vip/history').decision, 'rejected');
+  assert.equal(decide('/vip-club/history').decision, 'rejected');
+  assert.equal(decide('/loyalty/history').decision, 'rejected');
+  assert.equal(decide('/en/vip/history').decision, 'rejected');
+  assert.equal(decide('/en/account/vip').decision, 'rejected');
+});
+
 // Full URL Rules fixture sweep: every approved keep/drop/TBD/normalisation case
 // from docs/casino-discovery/URL-rules.md, so a rule edit cannot silently move a
 // route between visit classes.

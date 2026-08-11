@@ -1,11 +1,20 @@
 import type { Page } from 'playwright';
 import { collectPassiveInteractivity, hasVisibleLoadingIndicator } from './passive-interactivity.ts';
 import { controlledScrollPass, executeInteractionCandidates } from './interaction-delta-profiler.ts';
-import type { AutomaticDialogTrace, PagePassiveTrace, SettleStatus, VisitedPageRecord } from './types.ts';
+import { executeBoundedRevealCandidates } from './bounded-reveal.ts';
+import type {
+  AutomaticDialogTrace,
+  ErrorPageClassification,
+  InteractionMode,
+  PagePassiveTrace,
+  SettleStatus,
+  VisitedPageRecord,
+} from './types.ts';
 import { sha256, stablePageBasename, writeJsonAtomic, writeTextAtomic } from './io.ts';
 import path from 'node:path';
 import { withTimeout, TimeoutError, type PassiveNetworkObserver } from './url-discovery.ts';
 import { DEFAULT_RUNTIME_BUDGETS } from './runtime-config.ts';
+import { detectSoftErrorSignals, isErrorRoutePath } from './error-page-rules.ts';
 
 export interface PageCaptureOptions {
   page: Page;
@@ -25,16 +34,20 @@ export interface PageCaptureOptions {
   // normal runs (and every existing caller that doesn't pass these) are unaffected.
   settlePollIntervalMs?: number;
   settleStableSamples?: number;
-  // CD-N04: deterministic interaction execution from trace candidates. Defaults to enabled — a
-  // page whose passive trace has zero eligible candidates never touches the interaction/scroll
-  // machinery at all (see the length/signal guards in interaction-delta-profiler.ts and below),
-  // so existing minimal test doubles that don't implement the fuller Playwright Page API are
-  // unaffected unless they actually produce candidates or lazy-load signals.
-  interactionExecutionEnabled?: boolean;
+  // FIX-02: the run's declared interaction contract. Defaults to 'passive_only' — the only value
+  // that exists today — so every existing/omitted caller stays passive by default rather than
+  // opting into execution implicitly. CD-N04's executeInteractionCandidates (the one function in
+  // this codebase that can dispatch a mutating Playwright action) is invoked ONLY when this is
+  // set to something other than 'passive_only'; see the `runInteractions` gate below. No caller
+  // in this codebase currently sets a non-passive value — that is reserved for FIX-03.
+  interactionMode?: InteractionMode;
   interactionActionTimeoutMs?: number;
   interactionDeltaSettleMs?: number;
   interactionDeltaSettlePollIntervalMs?: number;
   interactionMaxCandidates?: number;
+  // FIX-03: bounded_reveal-only action-count budgets, ignored under any other interactionMode.
+  boundedRevealMaxActionsPerPage?: number;
+  boundedRevealMaxActionsPerAdapter?: number;
   lazyScrollEnabled?: boolean;
   lazyScrollMaxRounds?: number;
   lazyScrollStableRoundsRequired?: number;
@@ -184,12 +197,17 @@ export async function capturePage(options: PageCaptureOptions): Promise<VisitedP
       // spend the settle budget on a page we already know we won't capture.
       await options.networkObserver.flush();
       const completed = new Date();
+      // FIX-05 tier 2: HTTP status is already the strong signal here (no need to consult the
+      // route pattern or content heuristic — those are lower priority than a genuine 4xx/5xx).
       return {
         requestedUrl: options.requestedUrl,
         finalUrl: options.page.url(),
         status: 'failed',
         httpStatus: httpStatusFromResponse,
         failureReason: httpStatusFromResponse >= 500 ? 'http_server_error' : 'http_client_error',
+        errorPageClassification: 'error_page',
+        errorPageSignals: [`http_status:${httpStatusFromResponse}`],
+        errorPageReason: `Navigation resolved with unusable HTTP status ${httpStatusFromResponse}`,
         discoveredBy: options.discoveredBy,
         startedAt: started.toISOString(),
         completedAt: completed.toISOString(),
@@ -221,8 +239,58 @@ export async function capturePage(options: PageCaptureOptions): Promise<VisitedP
     // budget ran out ('timeout') — never silently indistinguishable from each other.
     const settleStatus: SettleStatus = settleResult.settled ? 'settled' : 'timeout';
 
+    // FIX-05 tier 1: the strongest signal after a genuinely bad HTTP status (tier 2, already
+    // ruled out above) — the browser followed a same-origin redirect/rewrite to a final URL
+    // that itself matches a versioned generic error-route pattern (see error-page-rules.ts),
+    // despite the transport reporting HTTP 200. This is never a hostname/brand-specific check
+    // and never triggers a second, differently-guessed navigation — the page that was actually
+    // reached is simply recorded as a failed visit with its real requested/final URL intact.
+    let finalPath = '';
+    try {
+      finalPath = new URL(finalUrl).pathname;
+    } catch {
+      // finalUrl came back non-parseable (should not happen for a real Playwright page.url());
+      // leave finalPath empty so the route-pattern check below simply doesn't match.
+    }
+    if (isErrorRoutePath(finalPath)) {
+      const completed = new Date();
+      return {
+        requestedUrl: options.requestedUrl,
+        finalUrl,
+        status: 'failed',
+        httpStatus,
+        settleStatus,
+        failureReason: 'soft_404_error_route',
+        errorPageClassification: 'error_page',
+        errorPageSignals: [`final_url_matches_error_route:${finalPath}`],
+        errorPageReason: `Final URL resolved to a configured terminal error route (${finalPath}) despite HTTP ${httpStatus ?? 'unknown'} status.`,
+        discoveredBy: options.discoveredBy,
+        startedAt: started.toISOString(),
+        completedAt: completed.toISOString(),
+        durationMs: completed.getTime() - started.getTime(),
+        error: {
+          name: 'SoftErrorRouteError',
+          message: `Navigation to ${options.requestedUrl} resolved to error route ${finalPath}`,
+        },
+      };
+    }
+
     const title = await options.page.title().catch(() => undefined);
     const html = await options.page.content();
+
+    // FIX-05 tier 3 (optional, lowest priority): the page kept its requested route and returned
+    // a clean HTTP status (tiers 1/2 already ruled out above), but its own title/body copy
+    // carries multiple independent generic error-page markers. Deliberately never forces a
+    // hard failure — flagged as `suspected_error_page` only, still captured/saved/reported as a
+    // normal `status: 'visited'` record, so ambiguous content-only evidence is surfaced for
+    // review rather than silently discarded or silently retried against a guessed alternate URL.
+    const softError = detectSoftErrorSignals({ title, html });
+    const errorPageClassification: ErrorPageClassification = softError.suspected ? 'suspected_error_page' : 'ok';
+    const errorPageSignals = softError.suspected ? softError.signals : undefined;
+    const errorPageReason = softError.suspected
+      ? 'Page kept its requested URL and HTTP status, but independent title and body error-page markers were both detected.'
+      : undefined;
+
     const passive = await collectPassiveInteractivity(options.page);
 
     // CD-N04: deterministic interaction execution against the live page, seeded from the passive
@@ -230,8 +298,19 @@ export async function capturePage(options: PageCaptureOptions): Promise<VisitedP
     // detected interactive elements and no lazy-load signal never invokes this machinery.
     let interactionExecutions: PagePassiveTrace['interactionExecutions'];
     let lazyScrollPass: PagePassiveTrace['lazyScrollPass'];
-    const interactionExecutionEnabled = options.interactionExecutionEnabled ?? true;
+    const interactionMode: InteractionMode = options.interactionMode ?? 'passive_only';
+    // FIX-02/FIX-03: hard gate. `executeInteractionCandidates` (full CD-N04 vocabulary, including
+    // modal_trigger/payment_method_card/pagination) and `executeBoundedRevealCandidates` (the
+    // FIX-03 allowlist-only adapter set) are the only functions in this codebase that can call a
+    // Playwright mutating action (click/fill/select/hover/press) — a passive_only run must be
+    // structurally incapable of reaching either, not merely configured not to by default. A
+    // bounded_reveal run is routed to the narrower, allowlist-gated executor, never the full one.
+    const interactionExecutionEnabled = interactionMode !== 'passive_only';
     const lazyScrollEnabled = options.lazyScrollEnabled ?? true;
+    // controlledScrollPass only ever calls window.scrollTo via page.evaluate() — no Playwright
+    // locator/mouse/keyboard action — so it stays available under passive_only; it is not part of
+    // the mutating-action vocabulary this ticket forbids (click/fill/select/hover/press/load-more
+    // refers to activating a load-more *control*, never to a passive scroll of the viewport).
     const runLazyScroll =
       lazyScrollEnabled && (passive.runtimeSignals.lazyImageCount > 0 || passive.runtimeSignals.lazySourceCount > 0);
     const runInteractions = interactionExecutionEnabled && passive.interactiveElements.length > 0;
@@ -245,7 +324,27 @@ export async function capturePage(options: PageCaptureOptions): Promise<VisitedP
       try {
         await withTimeout(
           (async () => {
-            if (runInteractions) {
+            if (runInteractions && interactionMode === 'bounded_reveal') {
+              interactionExecutions = await executeBoundedRevealCandidates(
+                options.page,
+                passive.interactiveElements,
+                options.requestedUrl,
+                {
+                  actionTimeoutMs: options.interactionActionTimeoutMs,
+                  deltaSettleMs: options.interactionDeltaSettleMs,
+                  deltaSettlePollIntervalMs: options.interactionDeltaSettlePollIntervalMs,
+                  maxActionsPerPage: options.boundedRevealMaxActionsPerPage,
+                  maxActionsPerAdapter: options.boundedRevealMaxActionsPerAdapter,
+                },
+              ).catch((error) => {
+                // A profiler-level failure (as opposed to one candidate's own recorded outcome)
+                // must never fail the whole page capture.
+                passive.notes.push(
+                  `bounded_reveal_execution_failed: ${error instanceof Error ? error.message : String(error)}`,
+                );
+                return undefined;
+              });
+            } else if (runInteractions) {
               interactionExecutions = await executeInteractionCandidates(options.page, passive.interactiveElements, {
                 actionTimeoutMs: options.interactionActionTimeoutMs,
                 deltaSettleMs: options.interactionDeltaSettleMs,
@@ -334,6 +433,9 @@ export async function capturePage(options: PageCaptureOptions): Promise<VisitedP
       status: 'visited',
       httpStatus,
       settleStatus,
+      errorPageClassification,
+      errorPageSignals,
+      errorPageReason,
       title,
       htmlPath,
       tracePath,

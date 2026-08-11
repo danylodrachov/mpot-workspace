@@ -102,6 +102,73 @@ export function parseRuntimeBudgetOverridesFromArgs(values: ReadonlyMap<string, 
   return overrides;
 }
 
+// FIX-01: bounded, configurable limits for CF-02's passive network-evidence capture (same-origin
+// textual xhr/fetch response bodies persisted under <runDir>/network/ and indexed in
+// network-evidence.jsonl — see captureNetworkEvidence in url-discovery.ts). Kept as their own
+// resolver (distinct from RuntimeBudgets above, which is exclusively time budgets) so a caller can
+// override either independently; every eligible response still gets an explicit ledger record
+// (captured/skipped/timeout/error) regardless of these limits — a response over either bound is
+// never silently dropped.
+export interface NetworkEvidenceLimits {
+  /** Bounded max size, in bytes, of a single response body eligible for capture. A response whose
+   *  declared or actual body size exceeds this is recorded with outcome 'skipped' and an explicit
+   *  reason, never captured. */
+  maxBodyBytes: number;
+  /** Bounded max number of 'captured' network-evidence records recorded per page visit. Once a
+   *  page's captured-record count reaches this limit, further eligible responses on that same
+   *  page are recorded with outcome 'skipped' and an explicit reason instead of being captured. */
+  maxRecordsPerPage: number;
+}
+
+export const DEFAULT_NETWORK_EVIDENCE_LIMITS: Readonly<NetworkEvidenceLimits> = Object.freeze({
+  maxBodyBytes: 10 * 1024 * 1024,
+  maxRecordsPerPage: 200,
+});
+
+export type NetworkEvidenceLimitOverrides = Partial<NetworkEvidenceLimits>;
+
+export function resolveNetworkEvidenceLimits(overrides: NetworkEvidenceLimitOverrides = {}): NetworkEvidenceLimits {
+  const resolved: NetworkEvidenceLimits = { ...DEFAULT_NETWORK_EVIDENCE_LIMITS };
+  for (const [key, value] of Object.entries(overrides) as Array<[keyof NetworkEvidenceLimits, number | undefined]>) {
+    if (value === undefined) continue;
+    if (!Number.isFinite(value) || value < 0) {
+      throw new Error(`Invalid network evidence limit override for ${key}: ${value}`);
+    }
+    resolved[key] = value;
+  }
+  return resolved;
+}
+
+// FIX-03: bounded_reveal action-count budgets — deliberately separate from RuntimeBudgets above
+// (those are all time budgets; these are action-count ceilings). Enforced by bounded-reveal.ts:
+// `maxActionsPerPage` bounds the total number of real actions executed against one page across
+// every adapter combined; `maxActionsPerAdapter` additionally bounds how many actions any single
+// adapter class (e.g. load_more) may run on that same page, so one chatty adapter can never
+// consume the whole per-page budget by itself.
+export interface BoundedRevealBudgets {
+  maxActionsPerPage: number;
+  maxActionsPerAdapter: number;
+}
+
+export const DEFAULT_BOUNDED_REVEAL_BUDGETS: Readonly<BoundedRevealBudgets> = Object.freeze({
+  maxActionsPerPage: 20,
+  maxActionsPerAdapter: 6,
+});
+
+export type BoundedRevealBudgetOverrides = Partial<BoundedRevealBudgets>;
+
+export function resolveBoundedRevealBudgets(overrides: BoundedRevealBudgetOverrides = {}): BoundedRevealBudgets {
+  const resolved: BoundedRevealBudgets = { ...DEFAULT_BOUNDED_REVEAL_BUDGETS };
+  for (const [key, value] of Object.entries(overrides) as Array<[keyof BoundedRevealBudgets, number | undefined]>) {
+    if (value === undefined) continue;
+    if (!Number.isInteger(value) || value < 0) {
+      throw new Error(`Invalid bounded_reveal budget override for ${key}: ${value}`);
+    }
+    resolved[key] = value;
+  }
+  return resolved;
+}
+
 export class NoProgressError extends Error {
   constructor(message: string) {
     super(message);

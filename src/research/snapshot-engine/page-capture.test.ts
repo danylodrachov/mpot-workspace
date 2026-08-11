@@ -338,3 +338,111 @@ test('regression 2026-08-10T14-58-23-014Z-360a9ab9: final URL is /en/rules but a
   assert.ok(record.htmlPath && fs.existsSync(record.htmlPath));
   assert.equal(record.finalUrl, 'https://example.test/en/rules');
 });
+
+// --- FIX-05: soft-404/error-page classification ---
+
+test('FIX-05 tier 1: HTTP 200 that resolves to a final /404 route is classified as a failed, non-successful visit, and writes no snapshot', async () => {
+  const pagesDir = makeTmpPagesDir();
+  const page = makeScriptedSettlePage({
+    status: 200,
+    urlAtTick: () => 'https://example.test/404',
+    htmlAtTick: () => '<html><body>generic site chrome, not necessarily error copy</body></html>',
+  });
+
+  const record = await capturePage({
+    page,
+    requestedUrl: 'https://example.test/deposit-limits',
+    pageIndex: 0,
+    pagesDir,
+    settleMs: 0,
+    settlePollIntervalMs: 1,
+    navigationTimeoutMs: 1000,
+    discoveredBy: [],
+    networkObserver: makeFakeNetworkObserver(),
+  });
+
+  // Requested/final URLs are recorded verbatim — no different guessed path is invented.
+  assert.equal(record.requestedUrl, 'https://example.test/deposit-limits');
+  assert.equal(record.finalUrl, 'https://example.test/404');
+  assert.equal(record.httpStatus, 200);
+  assert.equal(record.status, 'failed');
+  assert.equal(record.failureReason, 'soft_404_error_route');
+  assert.equal(record.errorPageClassification, 'error_page');
+  assert.ok(record.errorPageSignals && record.errorPageSignals.length > 0);
+  assert.ok(record.errorPageReason);
+  assert.equal(record.htmlPath, undefined);
+  assert.equal(record.tracePath, undefined);
+  assert.deepEqual(fs.readdirSync(pagesDir), []);
+});
+
+test('FIX-05 tier 2: a genuine HTTP 404 remains a failed visit classified as error_page', async () => {
+  const pagesDir = makeTmpPagesDir();
+  const record = await capturePage({
+    page: makeFakePage({ status: 404 }),
+    requestedUrl: 'https://example.test/missing',
+    pageIndex: 0,
+    pagesDir,
+    settleMs: 0,
+    navigationTimeoutMs: 1000,
+    discoveredBy: [],
+    networkObserver: makeFakeNetworkObserver(),
+  });
+
+  assert.equal(record.status, 'failed');
+  assert.equal(record.failureReason, 'http_client_error');
+  assert.equal(record.errorPageClassification, 'error_page');
+  assert.ok(record.errorPageSignals?.some((s) => s.startsWith('http_status:')));
+});
+
+test('FIX-05 tier 3: a page that keeps its requested URL/status but shows strong title+body error markers is marked suspected_error_page, not forced to fail', async () => {
+  const pagesDir = makeTmpPagesDir();
+  const page = makeScriptedSettlePage({
+    status: 200,
+    urlAtTick: () => 'https://example.test/promotions/summer-bonus',
+    htmlAtTick: () => '<html><body><h1>404</h1><p>Sorry, this page not found.</p></body></html>',
+  });
+  // Override title to a generic error-style title (page.title() is not scripted per-tick above).
+  (page as unknown as { title: () => Promise<string> }).title = async () => '404 Not Found';
+
+  const record = await capturePage({
+    page,
+    requestedUrl: 'https://example.test/promotions/summer-bonus',
+    pageIndex: 0,
+    pagesDir,
+    settleMs: 0,
+    settlePollIntervalMs: 1,
+    navigationTimeoutMs: 1000,
+    discoveredBy: [],
+    networkObserver: makeFakeNetworkObserver(),
+  });
+
+  // Ambiguous content-only case: still a real, saved visit — never forced to a hard failure, and
+  // never re-navigated to some other guessed URL.
+  assert.equal(record.status, 'visited');
+  assert.equal(record.requestedUrl, 'https://example.test/promotions/summer-bonus');
+  assert.equal(record.finalUrl, 'https://example.test/promotions/summer-bonus');
+  assert.equal(record.errorPageClassification, 'suspected_error_page');
+  assert.ok(record.errorPageSignals && record.errorPageSignals.length >= 2);
+  assert.ok(record.errorPageReason);
+  assert.ok(record.htmlPath && fs.existsSync(record.htmlPath));
+  assert.ok(record.tracePath && fs.existsSync(record.tracePath));
+});
+
+test('FIX-05: an ordinary page with clean content is classified ok and never flagged', async () => {
+  const pagesDir = makeTmpPagesDir();
+  const record = await capturePage({
+    page: makeFakePage({ status: 200 }),
+    requestedUrl: 'https://example.test/payments',
+    pageIndex: 0,
+    pagesDir,
+    settleMs: 0,
+    navigationTimeoutMs: 1000,
+    discoveredBy: [],
+    networkObserver: makeFakeNetworkObserver(),
+  });
+
+  assert.equal(record.status, 'visited');
+  assert.equal(record.errorPageClassification, 'ok');
+  assert.equal(record.errorPageSignals, undefined);
+  assert.equal(record.errorPageReason, undefined);
+});

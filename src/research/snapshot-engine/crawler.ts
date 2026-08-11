@@ -20,6 +20,7 @@ import type {
   CandidateProvenance,
   DiscoveryRunManifest,
   InteractionCandidateRecord,
+  InteractionMode,
   PageBehaviorRecord,
   PageSnapshotRecord,
   RawUrlCandidate,
@@ -31,24 +32,34 @@ import type {
   UrlDecisionRecord,
   VisitedPageRecord,
 } from './types.ts';
+import { assertPassiveOnlyInteractionRecords } from './interaction-contract.ts';
 import { appendJsonLine, ensureDir, makeRunId, slugify, stablePageBasename, writeJsonAtomic, writeTextAtomic } from './io.ts';
 import { writeReviewInput } from './review-input.ts';
-import { validateNetworkEvidenceIndex } from './post-run-review.ts';
+import { validateInteractionRecordsForReview, validateNetworkEvidenceIndex } from './post-run-review.ts';
 import { renderReviewHtml } from './review-renderer.ts';
 import { finalizeDebugArtifacts } from './debug-artifacts.ts';
 import { buildPageCorpus } from './page-content-pruner.ts';
 import { runJsonEvidenceBuild } from './json-evidence-builder.ts';
 import {
   resolveRuntimeBudgets,
+  resolveNetworkEvidenceLimits,
   ProgressWatchdog,
   NoProgressError,
   type RuntimeBudgetOverrides,
+  type NetworkEvidenceLimitOverrides,
 } from './runtime-config.ts';
 
 // CD-N01: used when a caller doesn't supply --geo. Not a real ISO/geo code — a deliberate,
 // consistent placeholder so a run folder name is always well-formed
 // (`<casino-slug>-<geo>-<date>-<time>`) even for a geo-agnostic/global crawl.
 const GEO_FALLBACK = 'xx';
+
+// FIX-02: single source of truth for this run's declared interaction contract — every artifact
+// that carries an `interactionMode` field (run-context.json, run-manifest.json,
+// interactions.jsonl records, and the interactionMode gate passed into capturePage()) reads this
+// same constant, so they can never drift apart within one run. Reserved for FIX-03 to promote to
+// a caller-supplied option once a second InteractionMode value exists.
+const RUN_INTERACTION_MODE: InteractionMode = 'passive_only';
 
 function pad2(value: number): string {
   return String(value).padStart(2, '0');
@@ -118,6 +129,9 @@ export interface CrawlOptions {
   // robotsSitemapBatchTimeoutMs) continue to take precedence over the corresponding entry here
   // when both are supplied, preserving existing call-site behavior.
   runtimeBudgetOverrides?: RuntimeBudgetOverrides;
+  // FIX-01: per-run overrides for CF-02's network-evidence capture (body-size/per-page record
+  // count limits). Any limit not listed here falls back to DEFAULT_NETWORK_EVIDENCE_LIMITS.
+  networkEvidenceLimitOverrides?: NetworkEvidenceLimitOverrides;
 }
 
 // CD-N07: whole page-capture/profiler step (navigation + settle + DOM/behavior profiling +
@@ -294,6 +308,9 @@ export async function crawlSite(options: CrawlOptions): Promise<DiscoveryRunMani
   // on top of the documented defaults. Individual legacy *TimeoutMs options below still take
   // precedence over their corresponding budget when both are supplied.
   const budgets = resolveRuntimeBudgets(options.runtimeBudgetOverrides);
+  // FIX-01: single resolved set of network-evidence limits for this run, same override pattern as
+  // the time budgets above.
+  const networkEvidenceLimits = resolveNetworkEvidenceLimits(options.networkEvidenceLimitOverrides);
   // CD-N07: no-progress watchdog — touched on every observed stage/page/action progress event
   // below. If it fires, the current bounded page-processing operation is abandoned (raced via
   // Promise.race, never left dangling as something the run waits on) and every remaining
@@ -545,7 +562,7 @@ export async function crawlSite(options: CrawlOptions): Promise<DiscoveryRunMani
     startedAt: startedAt.toISOString(),
     urlRulesVersion: URL_RULES_VERSION,
     browserMode: 'cdp',
-    interactionMode: 'passive_only',
+    interactionMode: RUN_INTERACTION_MODE,
   };
   await writeJsonAtomic(runContextPath, runContext);
   await writeJsonAtomic(
@@ -665,7 +682,12 @@ export async function crawlSite(options: CrawlOptions): Promise<DiscoveryRunMani
       allowedHostname,
       budgets.networkObserverFlushTimeoutMs,
       budgets.responseBodyScanTimeoutMs,
-      { evidenceDir: networkEvidenceDir, evidenceIndexPath: networkEvidenceIndexPath },
+      {
+        evidenceDir: networkEvidenceDir,
+        evidenceIndexPath: networkEvidenceIndexPath,
+        maxBodyBytes: networkEvidenceLimits.maxBodyBytes,
+        maxRecordsPerPage: networkEvidenceLimits.maxRecordsPerPage,
+      },
     );
     network.start();
     pageIndex += 1;
@@ -698,6 +720,7 @@ export async function crawlSite(options: CrawlOptions): Promise<DiscoveryRunMani
             settleMs: options.settleMs ?? budgets.pageSettleMs,
             navigationTimeoutMs: options.navigationTimeoutMs ?? budgets.navigationTimeoutMs,
             interactionExpansionTimeoutMs: budgets.interactionExpansionTimeoutMs,
+            interactionMode: RUN_INTERACTION_MODE,
             discoveredBy,
             networkObserver: network,
           }),
@@ -828,6 +851,7 @@ export async function crawlSite(options: CrawlOptions): Promise<DiscoveryRunMani
         finalUrl: record.finalUrl ?? record.requestedUrl,
         httpStatus: record.httpStatus,
         settleStatus: record.settleStatus,
+        errorPageClassification: record.errorPageClassification,
         title: record.title,
         htmlPath: record.htmlPath,
         tracePath: record.tracePath,
@@ -873,12 +897,18 @@ export async function crawlSite(options: CrawlOptions): Promise<DiscoveryRunMani
         });
         if (candidates.length > 0) {
           const interactionRecord: InteractionCandidateRecord = {
+            schemaVersion: '1.0',
             requestedUrl: record.requestedUrl,
             finalUrl: record.finalUrl,
             capturedAt: record.completedAt,
+            interactionMode: RUN_INTERACTION_MODE,
             candidateCount: candidates.length,
             candidates,
           };
+          // FIX-02: hard runtime assertion, not just the upstream page-capture.ts gate — even if
+          // some future call path fed an executed InteractionExecutionRecord in while this run is
+          // declared passive_only, that record must never reach interactions.jsonl on disk.
+          assertPassiveOnlyInteractionRecords(RUN_INTERACTION_MODE, [interactionRecord]);
           await appendJsonLine(interactionsJsonlPath, interactionRecord);
           interactionRecords += 1;
         }
@@ -969,6 +999,10 @@ export async function crawlSite(options: CrawlOptions): Promise<DiscoveryRunMani
   const tbd = decisions.filter((row) => row.decision === 'tbd');
   const visitedSuccess = visited.filter((row) => row.status === 'visited');
   const visitedFailed = visited.filter((row) => row.status === 'failed');
+  // FIX-05: separately expose successful vs soft/error pages — subsets of visitedSuccess/
+  // visitedFailed above, never a competing count that could drift from them.
+  const suspectedErrorPages = visitedSuccess.filter((row) => row.errorPageClassification === 'suspected_error_page');
+  const softErrorRouteFailures = visitedFailed.filter((row) => row.failureReason === 'soft_404_error_route');
   // FIX-03: keyed by canonicalUrl (route identity), not requestedUrl, since the URL actually
   // navigated to for an accepted route may be a localized alias rather than the bare
   // canonicalUrl string that appears in `accepted`.
@@ -1011,6 +1045,14 @@ export async function crawlSite(options: CrawlOptions): Promise<DiscoveryRunMani
   // no-op. A missing body throws and fails the whole run rather than handing the reviewer a
   // dangling reference.
   const networkEvidenceGate = await validateNetworkEvidenceIndex(networkEvidenceIndexPath);
+  // FIX-02: re-validate interactions.jsonl on the read side too (crawler.ts already asserts this
+  // per-record at write-time above) before review.html/review-input.json are ever produced from
+  // it — the review gate must reject, not silently render, a passive_only run whose interaction
+  // artifact claims an executed action.
+  // FIX-06: capture the validated records here (rather than discarding the return value) so they
+  // can be joined per-page into review-input.json's pageEvidence graph below, the same way the
+  // network-evidence gate's records already are.
+  const interactionRecordsForReview = await validateInteractionRecordsForReview(interactionsJsonlPath, RUN_INTERACTION_MODE);
   // CD-N01: url-inventory.json (the retained, consolidated accepted/rejected/tbd decision
   // ledger with full provenance) is written to the run folder root; review-input.json (the
   // bounded LLM-reviewer control payload derived from it) stays debug-only.
@@ -1025,6 +1067,12 @@ export async function crawlSite(options: CrawlOptions): Promise<DiscoveryRunMani
     // CF-03: only referenced when the index actually exists for this run — the index/bodies
     // themselves are never inlined into review-input.json.
     networkEvidenceIndexPath: networkEvidenceGate.present ? networkEvidenceIndexPath : undefined,
+    // FIX-01: same validated records used for the run-level gate above, reused here to build the
+    // per-page network-evidence join without re-reading the ledger from disk a second time.
+    networkEvidenceRecords: networkEvidenceGate.records,
+    // FIX-06: same validated records used for the read-side interaction-contract gate above,
+    // reused here to build the per-page interaction-state join in pageEvidence.
+    interactionRecords: interactionRecordsForReview,
   });
 
   // CD-N06: exactly one LLM invocation for the whole run, over the deterministic evidence
@@ -1088,7 +1136,7 @@ export async function crawlSite(options: CrawlOptions): Promise<DiscoveryRunMani
     completedAt: completedAt.toISOString(),
     browserMode: 'cdp',
     urlRulesVersion: URL_RULES_VERSION,
-    interactionMode: 'passive_only',
+    interactionMode: RUN_INTERACTION_MODE,
     status: runStatus,
     toolVersions: {
       playwright: readPlaywrightVersion(),
@@ -1101,6 +1149,8 @@ export async function crawlSite(options: CrawlOptions): Promise<DiscoveryRunMani
       tbd: tbd.length,
       visited: visitedSuccess.length,
       failed: visitedFailed.length,
+      suspectedErrorPages: suspectedErrorPages.length,
+      softErrorRouteFailures: softErrorRouteFailures.length,
       interactionRecords,
     },
     artifacts: {

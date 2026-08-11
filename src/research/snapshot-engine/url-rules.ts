@@ -1,12 +1,16 @@
 import type { CandidateProvenance, UrlDecisionRecord } from './types.ts';
 
-export const URL_RULES_VERSION = 'url-rules-2026-08-10-passive-crawl-v1';
+export const URL_RULES_VERSION = 'url-rules-2026-08-11-coverage-fix-v2';
 
 const DOCUMENT_KEEP_PATTERNS: Array<{ id: string; re: RegExp; reason: string }> = [
   { id: 'URLR_KEEP_BONUS', re: /^\/(?:bonuses|promo|offers(?:-[^/]+)?|promotions(?:\/[^/]+){0,2})\/?$/i, reason: 'Bonus/promotion document route (promotions is a deterministic alias of this class).' },
   { id: 'URLR_KEEP_PAYMENT', re: /^\/(?:deposit|withdraw|payment-methods|payments)\/?$/i, reason: 'Payment information route.' },
   { id: 'URLR_KEEP_LIMITS', re: /^\/(?:bet-limits|deposit-limits|loss-limits|time-limits)\/?$/i, reason: 'Limits information route.' },
   { id: 'URLR_KEEP_RULES', re: /^\/(?:terms-and-conditions(?:-[^/]+)?|bonus-terms|rules|sports-rules|casino-rules|live-casino-rules)\/?$/i, reason: 'Rules/terms route.' },
+  // FIX-04: public VIP/loyalty program landing. Only the bare top-level alias is a public
+  // landing; anything nested one level deeper (reward history, account-scoped VIP status, etc.)
+  // is excluded by URLR_DROP_ACCOUNT_UI/history rules before this pattern would ever apply.
+  { id: 'URLR_KEEP_LOYALTY_PROGRAM', re: /^\/(?:vip|vip-club|loyalty|loyalty-program|rewards|rewards-program)\/?$/i, reason: 'Public VIP/loyalty program landing route.' },
 ];
 
 const DROP_PATTERNS: Array<{ id: string; re: RegExp; reason: string }> = [
@@ -92,8 +96,13 @@ export function extractLocale(pathname: string): string | undefined {
 function canonicalProductCategory(path: string, url: URL): { url: URL; ruleId: string; reason: string } | undefined {
   const casinoNested = path.match(/^\/casino\/(slots|live-casino|virtual-sports)$/i);
   const casinoBare = path.match(/^\/(slots|live-casino|virtual-sports)$/i);
-  if (casinoNested || casinoBare) {
-    const category = (casinoNested ?? casinoBare)![1]!.toLowerCase();
+  // FIX-04: /games/<category> is a generic alias of the same product-category landing (e.g.
+  // /games/slots === /casino/slots). Only the closed approved-category vocabulary canonicalizes
+  // here; /games/<unknown-slug> is left unclassified and falls through to the individual
+  // game/event drop rule below, so it is never blindly accepted as a category.
+  const gamesAlias = path.match(/^\/games\/(slots|live-casino|virtual-sports)$/i);
+  if (casinoNested || casinoBare || gamesAlias) {
+    const category = (casinoNested ?? casinoBare ?? gamesAlias)![1]!.toLowerCase();
     const out = new URL(url.href);
     out.pathname = `/casino/${category}`;
     out.search = '';

@@ -19,6 +19,7 @@ import type {
   UrlInventoryDocument,
   VisitedPageRecord,
 } from './types.ts';
+import { assertPassiveOnlyInteractionRecords, isExecutedActionLabel } from './interaction-contract.ts';
 
 // CD-N03 rail rule IDs (see url-rules.ts canonicalProductCategory): the only ruleIds that denote
 // a product-collection RAIL entry (live-casino sub-category, sports category root) rather than an
@@ -33,6 +34,8 @@ const RAIL_RULE_IDS = new Set([
 // evidence, or failed/timed out/remained unresolved. `state_changed_no_new_evidence` and
 // `no_effect` are routine successful/no-op outcomes (excluded); `detected_candidate_only` is a
 // passive candidate that was never executed at all (excluded — nothing happened to review).
+// FIX-02: only ever populated for a non-passive_only run — see the interactionMode gate below;
+// a passive_only run's interactionRecords can never legally contain any of these labels.
 const EXCEPTION_OUTCOMES = new Set(['revealed_evidence', 'blocked', 'unsafe', 'timeout']);
 
 interface JsonCategoryFile {
@@ -97,14 +100,32 @@ export async function renderReviewHtml(runDir: string): Promise<string> {
 
   const blockedCount = pages.filter((p) => p.failureReason === 'blocked_suspected').length;
 
+  // FIX-02: hard read-side gate — never render a passive_only run's metrics from an
+  // interactions.jsonl that (validly or not) claims an executed-action outcome. crawler.ts already
+  // enforces this before renderReviewHtml is ever called from the real pipeline; re-asserting it
+  // here means a hand-built/legacy artifact fed straight into this function is rejected the same
+  // way, not silently rendered as if the run had performed real interactions.
+  assertPassiveOnlyInteractionRecords(manifest.interactionMode, interactionRecords);
+
+  const isPassiveOnly = manifest.interactionMode === 'passive_only';
+
+  // FIX-02: a passive_only run only ever reports how many interactive candidates were *detected*
+  // — "interaction success"/"interaction unresolved" describe an executed action's outcome, a
+  // concept this run structurally never produces. Non-passive modes (reserved for FIX-03) keep the
+  // executed-outcome success/unresolved split.
+  let interactiveCandidatesDetected = 0;
   let interactionSuccess = 0;
   let interactionUnresolved = 0;
   const exceptionRows: Array<{ requestedUrl: string; finalUrl?: string; tag: string; role?: string; name?: string; label: string }> = [];
   for (const record of interactionRecords) {
     for (const candidate of record.candidates) {
+      if (isPassiveOnly) {
+        interactiveCandidatesDetected += 1;
+        continue;
+      }
       if (candidate.label === 'revealed_evidence' || candidate.label === 'state_changed_no_new_evidence') interactionSuccess += 1;
       else if (candidate.label === 'blocked' || candidate.label === 'unsafe' || candidate.label === 'timeout') interactionUnresolved += 1;
-      if (EXCEPTION_OUTCOMES.has(candidate.label)) {
+      if (isExecutedActionLabel(candidate.label) && EXCEPTION_OUTCOMES.has(candidate.label)) {
         exceptionRows.push({
           requestedUrl: record.requestedUrl,
           finalUrl: record.finalUrl,
@@ -147,6 +168,13 @@ export async function renderReviewHtml(runDir: string): Promise<string> {
     )
     .join('\n');
 
+  // FIX-02: the interaction-metric summary line(s) — passive_only never renders "Interaction
+  // success"/"Interaction unresolved" (those phrases claim an executed action's outcome); it only
+  // ever reports how many candidates were detected without being touched.
+  const interactionSummaryLine = isPassiveOnly
+    ? `<li>Interactive candidates detected: ${interactiveCandidatesDetected}</li>`
+    : `<li>Interaction success: ${interactionSuccess}</li>\n<li>Interaction unresolved: ${interactionUnresolved}</li>`;
+
   return `<!doctype html>
 <html>
 <head>
@@ -163,9 +191,10 @@ export async function renderReviewHtml(runDir: string): Promise<string> {
 <li>Accepted: ${manifest.counts.accepted}</li>
 <li>Visited: ${manifest.counts.visited}</li>
 <li>Failed: ${manifest.counts.failed}</li>
+<li>Suspected error pages (visited but ambiguous): ${manifest.counts.suspectedErrorPages}</li>
+<li>Soft-404/error-route failures: ${manifest.counts.softErrorRouteFailures}</li>
 <li>Blocked: ${blockedCount}</li>
-<li>Interaction success: ${interactionSuccess}</li>
-<li>Interaction unresolved: ${interactionUnresolved}</li>
+${interactionSummaryLine}
 <li>Generated JSON files: ${jsonCategoryFiles.length}</li>
 </ul>
 

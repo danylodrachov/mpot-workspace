@@ -13,6 +13,11 @@ import path from 'node:path';
 // delta can produce a 'revealed_evidence' outcome. It is excluded from the blanket scan below and
 // instead covered by its own safety-contract assertions further down this file.
 const INTERACTION_EXECUTION_MODULE = 'interaction-delta-profiler.ts';
+// FIX-03 sanctioned exception: bounded-reveal.ts is the SECOND (and only other) module allowed to
+// perform a real interaction — strictly the small allowlisted bounded_reveal adapter set (tab,
+// accordion/disclosure, native select enumeration, combobox/listbox open, load-more), gated by its
+// own isSafeToExecute() hard filter. Covered by its own safety-contract assertions below.
+const BOUNDED_REVEAL_MODULE = 'bounded-reveal.ts';
 
 const engineDir = import.meta.dirname;
 const sources = fs
@@ -20,7 +25,9 @@ const sources = fs
   .filter((file) => file.endsWith('.ts') && !file.endsWith('.test.ts'))
   .map((file) => ({ file, text: fs.readFileSync(path.join(engineDir, file), 'utf-8') }));
 
-const passiveOnlySources = sources.filter((source) => source.file !== INTERACTION_EXECUTION_MODULE);
+const passiveOnlySources = sources.filter(
+  (source) => source.file !== INTERACTION_EXECUTION_MODULE && source.file !== BOUNDED_REVEAL_MODULE,
+);
 
 test('no snapshot-engine module performs a page-element interaction (except the sanctioned CD-N04 interaction-delta-profiler)', () => {
   const forbidden = [
@@ -87,6 +94,39 @@ test('CD-N04: no detector or action recipe in interaction-delta-profiler.ts depe
   const forbiddenNameFragments = [/react/i, /angular/i, /\bvue\b/i, /bootstrap/i, /\.casino\b/i];
   for (const pattern of forbiddenNameFragments) {
     assert.ok(!pattern.test(text), `${INTERACTION_EXECUTION_MODULE} must not encode framework-specific detection for ${pattern.source}`);
+  }
+});
+
+// FIX-03: bounded-reveal.ts is held to its own hard safety contract, even though it is allowed to
+// call .click(). Text-level guards against the specific regressions FIX-03 calls out: no arbitrary
+// custom-button clicking, transactional/credential/KYC/payment candidates always excluded, no
+// hostname-specific logic.
+test('FIX-03: bounded-reveal.ts defines the hard isSafeToExecute() gate and its exclusion patterns', () => {
+  const text = sources.find((source) => source.file === BOUNDED_REVEAL_MODULE)?.text ?? '';
+  assert.ok(text.length > 0, `${BOUNDED_REVEAL_MODULE} must exist`);
+  assert.match(text, /export function isSafeToExecute/);
+  for (const marker of ['FORM_SUBMISSION_PATTERN', 'TRANSACTIONAL_ACTION_PATTERN', 'CREDENTIAL_KYC_PAYMENT_PATTERN']) {
+    assert.match(text, new RegExp(marker), `${BOUNDED_REVEAL_MODULE} must define ${marker} exclusion evidence`);
+  }
+});
+
+test('FIX-03: bounded-reveal.ts never treats a bare custom_pointer_control hint as an executable adapter class', () => {
+  const text = sources.find((source) => source.file === BOUNDED_REVEAL_MODULE)?.text ?? '';
+  assert.ok(!text.includes("hints.has('custom_pointer_control')"));
+});
+
+test('FIX-03: bounded-reveal.ts does not implement modal_trigger/payment_method_card/pagination adapters (out of scope for bounded_reveal)', () => {
+  const text = sources.find((source) => source.file === BOUNDED_REVEAL_MODULE)?.text ?? '';
+  assert.ok(!/return\s+'modal_trigger'/.test(text));
+  assert.ok(!/return\s+'payment_method_card'/.test(text));
+  assert.ok(!/return\s+'pagination'/.test(text));
+});
+
+test('FIX-03: no detector or action recipe in bounded-reveal.ts depends on a casino hostname or framework-specific component name', () => {
+  const text = sources.find((source) => source.file === BOUNDED_REVEAL_MODULE)?.text ?? '';
+  const forbiddenNameFragments = [/react/i, /angular/i, /\bvue\b/i, /bootstrap/i, /\.casino\b/i];
+  for (const pattern of forbiddenNameFragments) {
+    assert.ok(!pattern.test(text), `${BOUNDED_REVEAL_MODULE} must not encode framework-specific detection for ${pattern.source}`);
   }
 });
 

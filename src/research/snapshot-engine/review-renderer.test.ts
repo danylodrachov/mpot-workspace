@@ -34,7 +34,7 @@ function baseManifest(): DiscoveryRunManifest {
     interactionMode: 'passive_only',
     status: 'complete',
     toolVersions: { node: process.version },
-    counts: { discovered: 3, accepted: 2, rejected: 1, tbd: 0, visited: 1, failed: 1, interactionRecords: 1 },
+    counts: { discovered: 3, accepted: 2, rejected: 1, tbd: 0, visited: 1, failed: 1, suspectedErrorPages: 0, softErrorRouteFailures: 0, interactionRecords: 1 },
     artifacts: {
       runManifest: 'run-manifest.json',
       urlInventory: 'url-inventory.json',
@@ -115,14 +115,20 @@ async function writeFixtureRun(runDir: string): Promise<void> {
   await appendJsonLine(path.join(runDir, 'pages.jsonl'), visitedPage);
   await appendJsonLine(path.join(runDir, 'pages.jsonl'), blockedPage);
 
+  // FIX-02: a passive_only run's interactions.jsonl may only ever carry observation-only rows
+  // (label: 'detected_candidate_only' or 'detector_error') — never an executed InteractionOutcome
+  // like 'revealed_evidence'/'no_effect'. See the rejection test further below for the case where
+  // a record violates this.
   const interactionRecord: InteractionCandidateRecord = {
+    schemaVersion: '1.0',
     requestedUrl: VISITED_URL,
     finalUrl: VISITED_URL,
     capturedAt: '2026-08-11T00:01:02.000Z',
+    interactionMode: 'passive_only',
     candidateCount: 2,
     candidates: [
-      { tag: 'button', role: 'button', name: 'Show table limits', domPath: 'button.limits', label: 'revealed_evidence', actionClass: 'modal_trigger' },
-      { tag: 'button', role: 'button', name: 'Sort by name', domPath: 'button.sort', label: 'no_effect', actionClass: 'dropdown_or_combobox' },
+      { tag: 'button', role: 'button', name: 'Show table limits', domPath: 'button.limits', label: 'detected_candidate_only' },
+      { tag: 'button', role: 'button', name: 'Sort by name', domPath: 'button.sort', label: 'detected_candidate_only' },
     ],
   };
   await appendJsonLine(path.join(runDir, 'interactions.jsonl'), interactionRecord);
@@ -153,7 +159,7 @@ test('CD-N02: renderReviewHtml produces exactly the 4 required sections in order
   assert.ok(interactionExceptionsIdx > productCollectionsIdx);
 });
 
-test('CD-N02: renderReviewHtml omits forbidden dumps and routine/never-executed interaction rows', async () => {
+test('CD-N02: renderReviewHtml omits forbidden dumps and never renders an executed-outcome label for a passive_only run', async () => {
   const runDir = mkdtemp();
   await writeFixtureRun(runDir);
 
@@ -161,9 +167,11 @@ test('CD-N02: renderReviewHtml omits forbidden dumps and routine/never-executed 
 
   // No rejected/tbd sample dump.
   assert.ok(!html.includes(REJECTED_SAMPLE_URL), 'rejected sample URLs must never be rendered');
-  // No raw candidate listing for the routine no_effect interaction row.
-  assert.ok(!html.includes('Sort by name'), 'routine no_effect candidates must be omitted from interaction exceptions');
-  assert.ok(!html.includes('no_effect'), 'no_effect outcome label must never appear');
+  // FIX-02: a passive_only run never renders an executed InteractionOutcome label anywhere —
+  // there is no "interesting exception" concept for a run that performed no interaction.
+  for (const executedLabel of ['revealed_evidence', 'state_changed_no_new_evidence', 'no_effect', 'blocked', 'unsafe', 'timeout']) {
+    assert.ok(!html.includes(executedLabel), `${executedLabel} must never appear in a passive_only review`);
+  }
 });
 
 test('CD-N02: renderReviewHtml traces every rendered fact/URL back to a real fixture source URL', async () => {
@@ -174,8 +182,42 @@ test('CD-N02: renderReviewHtml traces every rendered fact/URL back to a real fix
 
   assert.ok(html.includes(VISITED_URL));
   assert.ok(html.includes(RAIL_URL));
-  assert.ok(html.includes('Show table limits'));
-  assert.ok(html.includes('revealed_evidence'));
+});
+
+test('CD-N02: renderReviewHtml reports "Interactive candidates detected", never "Interaction success", for a passive_only run', async () => {
+  const runDir = mkdtemp();
+  await writeFixtureRun(runDir);
+
+  const html = await renderReviewHtml(runDir);
+
+  assert.ok(html.includes('Interactive candidates detected: 2'));
+  assert.ok(!html.includes('Interaction success'), '"Interaction success" is executed-action vocabulary and must never describe a passive run');
+  assert.ok(!html.includes('Interaction unresolved'));
+});
+
+// FIX-02: acceptance criterion — review generation must reject, not silently render, a
+// passive_only run whose interaction artifact falsely claims an executed action.
+test('FIX-02: renderReviewHtml rejects a passive_only run whose interactions.jsonl claims an executed-action outcome', async () => {
+  const runDir = mkdtemp();
+  await writeFixtureRun(runDir);
+
+  // Overwrite interactions.jsonl with a record that violates the contract — as if a legacy/local
+  // run producer bypassed crawler.ts's write-time assertion.
+  fs.writeFileSync(path.join(runDir, 'interactions.jsonl'), '');
+  const violatingRecord: InteractionCandidateRecord = {
+    schemaVersion: '1.0',
+    requestedUrl: VISITED_URL,
+    finalUrl: VISITED_URL,
+    capturedAt: '2026-08-11T00:01:02.000Z',
+    interactionMode: 'passive_only',
+    candidateCount: 1,
+    candidates: [
+      { tag: 'button', role: 'button', name: 'Show table limits', domPath: 'button.limits', label: 'revealed_evidence', actionClass: 'modal_trigger' },
+    ],
+  };
+  await appendJsonLine(path.join(runDir, 'interactions.jsonl'), violatingRecord);
+
+  await assert.rejects(() => renderReviewHtml(runDir), /passive_only/);
 });
 
 test('CD-N02: renderReviewHtml never imports Playwright/Puppeteer/LLM SDKs or reads ANTHROPIC_API_KEY', () => {

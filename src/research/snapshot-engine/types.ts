@@ -180,6 +180,11 @@ export interface PagePassiveTrace {
 // CD-N07: a page that was never attempted because the no-progress watchdog fired before its
 // turn — distinct from 'run_deadline_reached' (the overall run-time budget was exhausted) so a
 // consumer can tell "we ran out of time" apart from "nothing was progressing and we gave up".
+// FIX-05: an accepted URL that resolved (HTTP 200) to a final URL matching a versioned generic
+// error-route pattern (e.g. terminal /404, /not-found — see error-page-rules.ts). This is a
+// distinct terminal state from http_client_error/http_server_error: the HTTP transport itself
+// reported success, but the deterministic route-identity check still forced a failed visit
+// because navigating there produced no valid category evidence.
 export type PageFailureReason =
   | 'http_client_error'
   | 'http_server_error'
@@ -188,7 +193,8 @@ export type PageFailureReason =
   | 'page_capture_timeout'
   | 'page_settle_timeout'
   | 'run_deadline_reached'
-  | 'no_progress_watchdog';
+  | 'no_progress_watchdog'
+  | 'soft_404_error_route';
 
 // FIX-09: whether the bounded, best-effort settle-poll loop (see waitForPageSettle in
 // page-capture.ts) actually converged before its budget ran out. 'settled' means the DOM was
@@ -197,6 +203,23 @@ export type PageFailureReason =
 // sample taken anyway (best-effort) — a consumer that cares about snapshot trustworthiness
 // should treat 'timeout' captures as lower-confidence, never as indistinguishable from 'settled'.
 export type SettleStatus = 'settled' | 'timeout';
+
+// FIX-05: deterministic error/soft-404 page classification (see error-page-rules.ts).
+//   - ok:                     no error-page signal fired; the page is ordinary research evidence.
+//   - error_page:             a strong, deterministic signal fired — final URL matched a
+//                              versioned generic error-route pattern (tier 1), or the HTTP
+//                              transport itself already reported 4xx/5xx (tier 2). Always paired
+//                              with status: 'failed' on VisitedPageRecord — never counted as
+//                              successful research evidence.
+//   - suspected_error_page:   only the optional multi-signal content heuristic fired (tier 3) —
+//                              the page kept its requested URL/status but exposed strong,
+//                              independent title+body error-copy markers. Deliberately NOT forced
+//                              to status: 'failed' (ambiguous content-only evidence must never
+//                              invent a hard failure); the page is still captured and reported as
+//                              status: 'visited', with this classification/signals attached so a
+//                              downstream consumer can exclude it from a "clean success" count
+//                              without the crawler silently retrying a different guessed URL.
+export type ErrorPageClassification = 'ok' | 'error_page' | 'suspected_error_page';
 
 export interface VisitedPageRecord {
   requestedUrl: string;
@@ -218,6 +241,18 @@ export interface VisitedPageRecord {
   // visit never reached the settle-poll step, or reached it but is still reported failed for an
   // unrelated reason such as http_client_error captured before settling was attempted).
   settleStatus?: SettleStatus;
+  // FIX-05: always present once error-page classification has run for this visit (both the
+  // status:'failed' and status:'visited' paths set it — 'ok' is the explicit default, never
+  // inferred from its absence).
+  errorPageClassification?: ErrorPageClassification;
+  // FIX-05: the specific deterministic signal(s) that produced errorPageClassification above
+  // (e.g. "final_url_matches_error_route:/404", "title_matches_generic_error_marker:Not Found").
+  // Empty/absent only when errorPageClassification is 'ok'.
+  errorPageSignals?: string[];
+  // FIX-05: human-readable failure/suspected reason paired with the classification above —
+  // distinct from failureReason (a closed enum) so the exact rule/heuristic that fired stays
+  // legible without inventing a new enum member per phrasing.
+  errorPageReason?: string;
   title?: string;
   htmlPath?: string;
   tracePath?: string;
@@ -232,6 +267,18 @@ export interface VisitedPageRecord {
   };
 }
 
+// FIX-02/FIX-03: the run-level contract vocabulary.
+//   - passive_only:   this engine never clicks/fills/selects/hovers/presses a page element (see
+//                      page-capture.ts's interactionMode gate and passive-only.test.ts).
+//   - bounded_reveal: a small, generic, allowlisted set of low-risk reveal interactions (ARIA/
+//                      native tabs, aria-expanded disclosure/accordion controls, native <select>
+//                      option enumeration without changing selection, strongly-ARIA-signalled
+//                      combobox/listbox open-and-observe, load-more with a growth check) may run —
+//                      see bounded-reveal.ts. This is categorically NOT arbitrary custom-button
+//                      clicking: every candidate must pass the hard isSafeToExecute() gate and
+//                      match one of the allowlisted adapter classes before any action runs.
+export type InteractionMode = 'passive_only' | 'bounded_reveal';
+
 export interface RunContextRecord {
   schemaVersion: '1.0';
   runId: string;
@@ -242,7 +289,7 @@ export interface RunContextRecord {
   startedAt: string;
   urlRulesVersion: string;
   browserMode: 'cdp';
-  interactionMode: 'passive_only';
+  interactionMode: InteractionMode;
 }
 
 // One line per lifecycle event, appended as it happens so a crash mid-run still leaves a
@@ -267,6 +314,12 @@ export interface PageSnapshotRecord {
   // row can be told apart as a best-effort/unsettled capture without cross-referencing
   // page-visits.jsonl.
   settleStatus?: SettleStatus;
+  // FIX-05: mirrors VisitedPageRecord.errorPageClassification for this same page. A
+  // 'suspected_error_page' snapshot is still a real, saved HTML/trace capture (unlike
+  // 'error_page', which never reaches page-snapshots.jsonl at all since that path is
+  // status:'failed') — this field is how a page-snapshots.jsonl consumer tells a clean success
+  // apart from ambiguous soft-error evidence without cross-referencing pages.jsonl.
+  errorPageClassification?: ErrorPageClassification;
   title?: string;
   htmlPath: string;
   tracePath: string;
@@ -292,7 +345,13 @@ export type InteractionActionClass =
   | 'load_more'
   | 'pagination'
   | 'lazy_scroll_surface'
-  | 'iframe_interaction';
+  | 'iframe_interaction'
+  // FIX-03: bounded_reveal-only adapter classes — a native <select> enumerated without changing
+  // its selection, and a custom combobox/listbox opened-and-observed on the strength of a strong
+  // ARIA relationship signal (role=combobox/listbox plus aria-controls/aria-owns or
+  // aria-haspopup=listbox). Never produced by the passive_only/CD-N04 classifier above.
+  | 'native_select_enumeration'
+  | 'combobox_listbox_open';
 
 // CD-N04: which deterministic evidence a candidate's locator was resolved from, in the mandated
 // preference order (stable_id first, dom_path_fallback last-resort only).
@@ -313,13 +372,34 @@ export interface LocatorEvidence {
 // CD-N04: terminal status of one executed interaction. `revealed_evidence` is the only status
 // that means "new evidence was collected" — it is set solely from a measurable before/after
 // delta, never from the mere existence of the trace candidate.
+//
+// FIX-02: this is the vocabulary of an ACTION THAT ACTUALLY RAN (a real click/fill/select/etc.
+// dispatched against the live page) — it is categorically distinct from a passive observation.
+// A passive_only run's InteractionMode never permits any value from this union to reach an
+// on-disk observation record (see ObservationCandidateStatus / ObservationCandidateRow below,
+// and the runtime gate in page-capture.ts that stops executeInteractionCandidates from ever being
+// invoked while interactionMode === 'passive_only'). FIX-03's bounded-reveal executed-interaction
+// records are expected to keep using this same outcome vocabulary.
+// FIX-03: 'unsupported' is added for bounded_reveal's adapter-precondition gate — a candidate
+// that carries a plausible reveal hint but fails the adapter's own strict semantic precondition
+// (e.g. a "combobox-like" control with no strong ARIA relationship signal) is recorded as
+// 'unsupported' and is NEVER clicked; it remains a trace candidate only, for later human-reviewed
+// adapter work (see FIX-03 ticket "Explicit limitation").
 export type InteractionOutcome =
   | 'revealed_evidence'
   | 'state_changed_no_new_evidence'
   | 'no_effect'
   | 'blocked'
   | 'unsafe'
-  | 'timeout';
+  | 'timeout'
+  | 'unsupported';
+
+// FIX-02: the only vocabulary a PASSIVE observation is ever allowed to carry. 'detected_candidate_only'
+// means a trace candidate was seen but never touched; 'detector_error' means the passive detector
+// itself failed to classify/read a candidate (a detector-side fault, never an executed-action
+// outcome). Neither value implies any Playwright mutating action (click/fill/select/hover/press/
+// load-more) was ever invoked.
+export type ObservationCandidateStatus = 'detected_candidate_only' | 'detector_error';
 
 export interface InteractionDelta {
   contentChanged: boolean;
@@ -373,24 +453,59 @@ export interface LazyScrollPassResult {
 
 // CD-N01: one line per successfully captured page that had at least one detected passive
 // interactive candidate, appended immediately after that page's behavior trace is read back.
-// CD-N04: candidates that were deterministically promoted to an InteractionActionClass and
-// actually executed now carry their real InteractionOutcome label and actionClass; a candidate
-// that was never eligible for automatic execution (excluded by class, or execution was capped)
-// keeps the original 'detected_candidate_only' label — a trace candidate alone never becomes
-// 'revealed_evidence' or any other executed-outcome label without a real recorded action.
-export interface InteractionCandidateRow {
+//
+// FIX-02: schema split at the type level between an OBSERVATION record (this run only ever looked
+// at the candidate) and an EXECUTED record (a real action ran against it and produced a measured
+// before/after delta). These are never the same shape — a bare trace candidate can never silently
+// become 'revealed_evidence' or any other InteractionOutcome without a real recorded action, and a
+// passive_only run's manifest.interactionMode makes ObservationCandidateRow the ONLY row shape its
+// interactions.jsonl may legally contain (enforced at runtime in crawler.ts and re-validated by the
+// review pipeline in post-run-review.ts — see assertPassiveOnlyInteractionRecords).
+export interface ObservationCandidateRow {
   tag: string;
   role?: string;
   name?: string;
   domPath: string;
-  label: 'detected_candidate_only' | InteractionOutcome;
-  actionClass?: InteractionActionClass;
+  label: ObservationCandidateStatus;
+  // An observation row never carries an actionClass promotion or an executed outcome — those only
+  // exist on ExecutedCandidateRow, produced by a genuinely executed interaction.
 }
 
+// FIX-02: reserved as the interface FIX-03's bounded-reveal executed-interaction records conform
+// to. Not produced anywhere on the current passive_only-only execution path (see page-capture.ts's
+// interactionMode gate); kept here so a future non-passive InteractionMode has a ready-made,
+// already-reviewed row shape rather than inventing a second one under time pressure.
+export interface ExecutedCandidateRow {
+  tag: string;
+  role?: string;
+  name?: string;
+  domPath: string;
+  label: InteractionOutcome;
+  actionClass: InteractionActionClass;
+}
+
+// FIX-02: discriminated by `label` — an ObservationCandidateStatus value on `label` narrows the
+// row to ObservationCandidateRow, any InteractionOutcome value narrows it to ExecutedCandidateRow.
+// Kept as a union (rather than two disjoint on-disk record types) because both rows share the same
+// interactions.jsonl file/line shape on disk; the mode-level contract lives in
+// InteractionCandidateRecord.interactionMode below, not in a separate file format.
+export type InteractionCandidateRow = ObservationCandidateRow | ExecutedCandidateRow;
+
 export interface InteractionCandidateRecord {
+  // FIX-02: versions this row's schema so a legacy interactions.jsonl line written before this
+  // ticket (no schemaVersion field, potentially mixing an executed-outcome label into what its
+  // run-manifest.json declared a passive_only run) can be told apart from a current-contract line.
+  // Absence of this field always means "pre-FIX-02, unverified" — never treated as equivalent to
+  // '1.0' by any validator.
+  schemaVersion: '1.0';
   requestedUrl: string;
   finalUrl?: string;
   capturedAt: string;
+  // FIX-02: the run's declared interactionMode at the time this record was written, copied onto
+  // every record rather than requiring a cross-reference back to run-manifest.json — so a
+  // validator (or a human) can tell from this line alone whether an ExecutedCandidateRow among
+  // `candidates` below is a contract violation.
+  interactionMode: InteractionMode;
   candidateCount: number;
   candidates: InteractionCandidateRow[];
 }
@@ -450,7 +565,7 @@ export interface DiscoveryRunManifest {
   completedAt: string;
   browserMode: 'cdp';
   urlRulesVersion: string;
-  interactionMode: 'passive_only';
+  interactionMode: InteractionMode;
   status: RunStatus;
   toolVersions: {
     playwright?: string;
@@ -463,6 +578,17 @@ export interface DiscoveryRunManifest {
     tbd: number;
     visited: number;
     failed: number;
+    // FIX-05: subset of `visited` above whose errorPageClassification is 'suspected_error_page'
+    // — a page that IS counted as visited (it was captured, and no hard failure was forced) but
+    // whose content carries ambiguous, multi-signal error-page markers. Exposed separately so a
+    // consumer can compute a "clean success" count (visited - suspectedErrorPages) without
+    // silently folding soft-error pages into ordinary successful evidence.
+    suspectedErrorPages: number;
+    // FIX-05: subset of `failed` above whose failureReason is 'soft_404_error_route' — an HTTP
+    // 200 response that still resolved to a versioned generic error-route final URL. Kept as its
+    // own bucket (same pattern as the existing blocked/blocked_suspected bucket) rather than
+    // collapsed into the generic failed count.
+    softErrorRouteFailures: number;
     // CD-N01: number of interaction-candidate records written to interactions.jsonl (one row
     // per successfully captured page that had at least one detected candidate), so
     // run-manifest.json/interactions.jsonl reconcile the same way counts.visited reconciles
@@ -566,9 +692,92 @@ export interface ReviewInputAcceptedTarget {
   reason: string;
 }
 
+// FIX-01: bounded, per-visited-page reference into network-evidence.jsonl — joins each visited
+// page (identified by its requested/final URL) to the subset of NetworkEvidenceRecord rows whose
+// observedOnPageUrl matches it. Never inlines response bodies themselves; a consumer follows
+// `bodyPath` (already present on each ref, copied verbatim from the ledger record) to read the
+// actual body when one exists (outcome === 'captured').
+export interface ReviewInputPageNetworkEvidenceRef {
+  requestUrl: string;
+  requestMethod: string;
+  resourceType: string;
+  status: number;
+  contentType?: string;
+  outcome: NetworkEvidenceOutcome;
+  bodyPath?: string;
+  bodySha256?: string;
+  bodyBytes?: number;
+  reason?: string;
+}
+
+export interface ReviewInputPageNetworkEvidence {
+  visitedPageRequestedUrl: string;
+  visitedPageFinalUrl?: string;
+  records: ReviewInputPageNetworkEvidenceRef[];
+}
+
+// FIX-06: the vocabulary a review fact/page-evidence-section's provenance may be tagged with.
+// 'html' — the saved page HTML/behavior-trace corpus for that visited page.
+// 'network' — a same-origin captured network-evidence record/body observed on that page.
+// 'interaction_state' — a state snapshot/delta from a REAL executed bounded_reveal interaction
+//   record for that page (never a passive-only observation candidate — see
+//   ReviewInputPageEvidence.interactionStateRecords below, which can only ever contain
+//   ExecutedCandidateRow rows by construction).
+// A single fact/page section may legitimately carry more than one of these at once (e.g. a value
+// confirmed in both HTML and a captured network body), hence this is always an array, never a
+// single enum value.
+export type ReviewInputEvidenceSource = 'html' | 'network' | 'interaction_state';
+
+// FIX-06: the bounded, per-visited-page join of FIX-03's ExecutedCandidateRow rows (never
+// ObservationCandidateRow — ObservationCandidateRow has no actionClass field and is filtered out
+// at construction time in review-input.ts) onto that page, so the reviewer can see exactly which
+// state snapshot/delta a fact derived from an executed interaction is backed by. Always empty for
+// a passive_only run (which can never legally produce an ExecutedCandidateRow — see
+// interaction-contract.ts's assertPassiveOnlyInteractionRecords).
+export interface ReviewInputPageInteractionStateRef {
+  tag: string;
+  role?: string;
+  name?: string;
+  domPath: string;
+  actionClass: InteractionActionClass;
+  label: InteractionOutcome;
+}
+
+// FIX-06: the complete per-visited-page evidence graph entry — explicit references (never
+// inlined bodies/full text) to every evidence class collected for that page, plus its navigation/
+// error classification and exact requested/final URL. This is the primary FIX-06 addition to
+// ReviewInputDocument; pageNetworkEvidence above is retained unchanged (bitwise-compatible with
+// pre-FIX-06 consumers) and this supersedes it as the single per-page evidence entry point going
+// forward.
+export interface ReviewInputPageEvidence {
+  requestedUrl: string;
+  finalUrl?: string;
+  // Reference only — the HTML/trace text itself is never inlined into review-input.json.
+  htmlSnapshotPath?: string;
+  passiveTracePath?: string;
+  // Same shape/join as ReviewInputPageNetworkEvidenceRef above, scoped to this one page.
+  networkEvidenceRecords: ReviewInputPageNetworkEvidenceRef[];
+  // FIX-06/FIX-03: only ever populated when this page had a REAL executed bounded_reveal
+  // interaction record (ExecutedCandidateRow) — never a passive observation candidate.
+  interactionStateRecords: ReviewInputPageInteractionStateRef[];
+  // FIX-05: mirrors VisitedPageRecord's own fields for this page, surfaced per-page here (not
+  // just as a run-level manifest count) so the reviewer can see exactly which pages are ambiguous
+  // without cross-referencing pages.jsonl.
+  errorPageClassification?: ErrorPageClassification;
+  errorPageSignals?: string[];
+  errorPageReason?: string;
+  // FIX-06: which evidence classes are actually present for this page, computed deterministically
+  // from the fields above (never asserted independently of them) — 'html' only when a snapshot/
+  // trace path is present, 'network' only when networkEvidenceRecords is non-empty,
+  // 'interaction_state' only when interactionStateRecords is non-empty.
+  evidenceSources: ReviewInputEvidenceSource[];
+}
+
 export interface ReviewInputDocument {
-  // CF-03: bumped 1.1 -> 1.2 for the addition of networkEvidenceIndexPath below.
-  schemaVersion: '1.2';
+  // FIX-06: bumped 1.3 -> 1.4 for the addition of pageEvidence below (the complete per-visited-
+  // page evidence graph — HTML/trace/network/interaction-state references, error classification,
+  // and evidence-source provenance in one place per page).
+  schemaVersion: '1.4';
   runId: string;
   entryUrl: string;
   geo?: string;
@@ -581,6 +790,15 @@ export interface ReviewInputDocument {
   // by path, exactly like fullUrlInventoryPath below. Absent (undefined) when CF-02 produced no
   // eligible network traffic this run (backward-compatible with pre-CF-02 runs).
   networkEvidenceIndexPath?: string;
+  // FIX-01: deterministic per-visited-page join over the same ledger referenced by
+  // networkEvidenceIndexPath above — one entry per visited page that has at least one matching
+  // NetworkEvidenceRecord (observedOnPageUrl equal to that page's requested/final/alias URL).
+  // Empty array when networkEvidenceIndexPath is absent or produced no page-matching records.
+  pageNetworkEvidence: ReviewInputPageNetworkEvidence[];
+  // FIX-06: the complete per-visited-page evidence graph — one entry per row in `visited` above,
+  // in the same order. Supersedes pageNetworkEvidence as the primary per-page evidence reference
+  // point; pageNetworkEvidence is kept unchanged for backward compatibility with existing readers.
+  pageEvidence: ReviewInputPageEvidence[];
   urlCounts: {
     discovered: number;
     accepted: number;
@@ -588,6 +806,9 @@ export interface ReviewInputDocument {
     tbd: number;
     visited: number;
     failed: number;
+    // FIX-05: mirrors DiscoveryRunManifest.counts.suspectedErrorPages — surfaced here too since
+    // review-input.json (not run-manifest.json) is what the post-run LLM reviewer actually reads.
+    suspectedErrorPages: number;
   };
   // Accepted canonical research targets are small in number (bounded by real research pages on
   // a casino site, not by technical/asset noise) and are included in full — never sampled.

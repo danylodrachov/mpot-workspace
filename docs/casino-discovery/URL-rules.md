@@ -1,5 +1,7 @@
 # URL Rules
 
+Current authoritative version: `url-rules-2026-08-11-coverage-fix-v2` (implemented in `src/research/snapshot-engine/url-rules.ts`, `URL_RULES_VERSION`).
+
 ## Purpose
 
 These rules define which URLs are allowed in `document-url-map.json`.
@@ -116,6 +118,22 @@ Example:
 /football
 ```
 
+### `/games/<category>` alias (v2)
+
+`/games/<category>` is a generic alias of the same canonical `/casino/<category>` landing, for
+the same closed approved-category vocabulary (`slots`, `live-casino`, `virtual-sports`). It
+canonicalizes identically to the `/casino/<category>` and bare `/<category>` shapes:
+
+```
+/games/slots           → /casino/slots
+/games/live-casino     → /casino/live-casino
+/games/virtual-sports  → /casino/virtual-sports
+```
+
+Only the approved category vocabulary canonicalizes this way. `/games/<unknown-slug>` is not
+blindly accepted as a category — it is left unclassified and falls through to the individual
+game/event rejection rule below, exactly like `/game/<unknown-slug>`.
+
 Never keep:
 
 - live filters
@@ -181,6 +199,31 @@ routes — these are rejected regardless of nesting depth:
 ```
 
 "More Games" / individual live game links on the landing page must never be enqueued.
+
+---
+
+## Public Loyalty / VIP Program (v2)
+
+Keep only the bare top-level public landing alias, using the exact generic alias set below
+(no hostname-specific paths):
+
+- `/vip`
+- `/vip-club`
+- `/loyalty`
+- `/loyalty-program`
+- `/rewards`
+- `/rewards-program`
+
+Never keep — nested/account-scoped VIP or reward-history routes remain excluded regardless of
+which top-level alias they nest under:
+
+```
+/account/vip        → rejected (Account UI)
+/my-account/vip      → rejected (Account UI)
+/vip/history          → rejected (unclassified nested route)
+/vip-club/history      → rejected (unclassified nested route)
+/loyalty/history        → rejected (unclassified nested route)
+```
 
 ---
 

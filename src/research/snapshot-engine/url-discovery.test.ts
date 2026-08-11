@@ -390,3 +390,74 @@ test('CF-02: identical response bodies observed twice in one run are deduplicate
   assert.equal(captured[0]!.bodyPath, captured[1]!.bodyPath, 'identical bodies must dedupe to the same on-disk file');
   assert.equal(fs.readdirSync(evidenceDir).length, 1, 'only one body file should exist on disk for the duplicate content');
 });
+
+test('FIX-01: a per-page network-evidence capture cap skips further eligible responses with an explicit reason', async () => {
+  const handlers: Record<string, (...args: unknown[]) => void> = {};
+  const page = makeFakePage(handlers);
+  const sink = makeSink();
+  const { evidenceDir, evidenceIndexPath } = makeEvidenceDirs();
+
+  const observer = new PassiveNetworkObserver(page as never, sink, 'example.com', 1_000, undefined, {
+    evidenceDir,
+    evidenceIndexPath,
+    maxRecordsPerPage: 2,
+  });
+  observer.start();
+
+  for (const url of [
+    'https://example.com/api/v3/a',
+    'https://example.com/api/v3/b',
+    'https://example.com/api/v3/c',
+  ]) {
+    handlers.response(
+      makeEvidenceResponse({
+        url,
+        bodyPromise: async () => Buffer.from(`{"url":"${url}"}`),
+        contentType: 'application/json',
+        resourceType: 'xhr',
+      }),
+    );
+  }
+  await observer.flush();
+  observer.stop();
+
+  const records = readEvidenceIndex(evidenceIndexPath);
+  const captured = records.filter((row) => row.outcome === 'captured');
+  const skipped = records.filter((row) => row.outcome === 'skipped');
+  assert.equal(captured.length, 2, 'expected exactly maxRecordsPerPage captured records');
+  assert.equal(skipped.length, 1, 'expected the third response to be recorded as skipped, not dropped');
+  assert.ok(
+    skipped[0]!.reason && /capture limit/.test(skipped[0]!.reason),
+    'expected an explicit capture-limit reason on the skipped record',
+  );
+});
+
+test('FIX-01: a configurable maxBodyBytes override is honored instead of the hardcoded default', async () => {
+  const handlers: Record<string, (...args: unknown[]) => void> = {};
+  const page = makeFakePage(handlers);
+  const sink = makeSink();
+  const { evidenceDir, evidenceIndexPath } = makeEvidenceDirs();
+
+  const observer = new PassiveNetworkObserver(page as never, sink, 'example.com', 1_000, undefined, {
+    evidenceDir,
+    evidenceIndexPath,
+    maxBodyBytes: 10,
+  });
+  observer.start();
+
+  handlers.response(
+    makeEvidenceResponse({
+      url: 'https://example.com/api/v3/small-but-over-custom-limit',
+      bodyPromise: async () => Buffer.from('this body is longer than 10 bytes'),
+      contentType: 'application/json',
+      resourceType: 'xhr',
+    }),
+  );
+  await observer.flush();
+  observer.stop();
+
+  const records = readEvidenceIndex(evidenceIndexPath);
+  const record = records.find((row) => row.requestUrl === 'https://example.com/api/v3/small-but-over-custom-limit');
+  assert.equal(record?.outcome, 'skipped');
+  assert.ok(record?.reason && /exceeds 10 byte limit/.test(record.reason));
+});

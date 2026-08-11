@@ -1,7 +1,15 @@
 import { readdir } from 'node:fs/promises';
 import path from 'node:path';
 import type {
+  ExecutedCandidateRow,
+  InteractionCandidateRecord,
+  NetworkEvidenceRecord,
   ReviewInputDocument,
+  ReviewInputEvidenceSource,
+  ReviewInputPageEvidence,
+  ReviewInputPageInteractionStateRef,
+  ReviewInputPageNetworkEvidence,
+  ReviewInputPageNetworkEvidenceRef,
   ReviewInputRuleGroupCount,
   ReviewInputRuleGroupSample,
   ReviewInputSourceFamilyCoverage,
@@ -11,6 +19,7 @@ import type {
   VisitedPageRecord,
 } from './types.ts';
 import { writeJsonAtomic } from './io.ts';
+import { validatePageEvidenceGraph } from './post-run-review.ts';
 
 // FIX-05: bounded number of representative samples kept per ruleId group in review-input.json.
 // The full set of matching URLs for any ruleId is always recoverable from url-inventory.json.
@@ -76,6 +85,118 @@ export interface WriteReviewInputResult {
   urlInventoryPath: string;
 }
 
+// FIX-01: deterministic per-visited-page join of NetworkEvidenceRecord rows onto the visited-page
+// URL (requested/final/canonical/alias forms all match, since a page's response traffic may be
+// observed against any of them depending on redirect/locale-alias history) that produced them.
+// Never inlines response bodies — only the same reference fields already present on the ledger
+// record (bodyPath/bodySha256/bodyBytes/outcome/...).
+function buildPageNetworkEvidence(
+  visited: VisitedPageRecord[],
+  records: NetworkEvidenceRecord[],
+): ReviewInputPageNetworkEvidence[] {
+  if (records.length === 0) return [];
+  const result: ReviewInputPageNetworkEvidence[] = [];
+  for (const page of visited) {
+    if (page.status !== 'visited') continue;
+    const pageUrls = new Set<string>(
+      [page.requestedUrl, page.finalUrl, page.canonicalUrl, ...(page.aliasUrls ?? [])].filter(
+        (url): url is string => Boolean(url),
+      ),
+    );
+    const matches = records.filter((record) => pageUrls.has(record.observedOnPageUrl));
+    if (matches.length === 0) continue;
+    result.push({
+      visitedPageRequestedUrl: page.requestedUrl,
+      visitedPageFinalUrl: page.finalUrl,
+      records: matches.map((record) => ({
+        requestUrl: record.requestUrl,
+        requestMethod: record.requestMethod,
+        resourceType: record.resourceType,
+        status: record.status,
+        contentType: record.contentType,
+        outcome: record.outcome,
+        bodyPath: record.bodyPath,
+        bodySha256: record.bodySha256,
+        bodyBytes: record.bodyBytes,
+        reason: record.reason,
+      })),
+    });
+  }
+  return result;
+}
+
+// FIX-06: the same join pattern as buildPageNetworkEvidence above, extended to build the complete
+// per-visited-page evidence graph — HTML/trace references, network-evidence references,
+// interaction-state references (only ever ExecutedCandidateRow — never a passive observation
+// candidate), FIX-05 error classification, and a deterministic evidenceSources provenance tag
+// computed from the fields actually populated. One entry per row in `visited`, same order.
+function buildPageEvidenceGraph(
+  visited: VisitedPageRecord[],
+  networkRecords: NetworkEvidenceRecord[],
+  interactionRecords: InteractionCandidateRecord[],
+): ReviewInputPageEvidence[] {
+  return visited.map((page) => {
+    const pageUrls = new Set<string>(
+      [page.requestedUrl, page.finalUrl, page.canonicalUrl, ...(page.aliasUrls ?? [])].filter(
+        (url): url is string => Boolean(url),
+      ),
+    );
+
+    const networkMatches = networkRecords.filter((record) => pageUrls.has(record.observedOnPageUrl));
+    const networkEvidenceRecords: ReviewInputPageNetworkEvidenceRef[] = networkMatches.map((record) => ({
+      requestUrl: record.requestUrl,
+      requestMethod: record.requestMethod,
+      resourceType: record.resourceType,
+      status: record.status,
+      contentType: record.contentType,
+      outcome: record.outcome,
+      bodyPath: record.bodyPath,
+      bodySha256: record.bodySha256,
+      bodyBytes: record.bodyBytes,
+      reason: record.reason,
+    }));
+
+    // FIX-06: joins by the same requested/final/canonical/alias URL set as the network join
+    // above. Only rows with an `actionClass` field (i.e. ExecutedCandidateRow — a REAL executed
+    // interaction) are ever included; an ObservationCandidateRow (passive-only, no `actionClass`)
+    // is structurally excluded here — this is the enforcement point for "a passive candidate can
+    // never appear tagged as interaction_state/executed evidence".
+    const interactionMatches = interactionRecords.filter(
+      (record) => pageUrls.has(record.requestedUrl) || (record.finalUrl !== undefined && pageUrls.has(record.finalUrl)),
+    );
+    const interactionStateRecords: ReviewInputPageInteractionStateRef[] = interactionMatches.flatMap((record) =>
+      record.candidates
+        .filter((candidate): candidate is ExecutedCandidateRow => 'actionClass' in candidate)
+        .map((candidate) => ({
+          tag: candidate.tag,
+          role: candidate.role,
+          name: candidate.name,
+          domPath: candidate.domPath,
+          actionClass: candidate.actionClass,
+          label: candidate.label,
+        })),
+    );
+
+    const evidenceSources: ReviewInputEvidenceSource[] = [];
+    if (page.htmlPath || page.tracePath) evidenceSources.push('html');
+    if (networkEvidenceRecords.length > 0) evidenceSources.push('network');
+    if (interactionStateRecords.length > 0) evidenceSources.push('interaction_state');
+
+    return {
+      requestedUrl: page.requestedUrl,
+      finalUrl: page.finalUrl,
+      htmlSnapshotPath: page.htmlPath,
+      passiveTracePath: page.tracePath,
+      networkEvidenceRecords,
+      interactionStateRecords,
+      errorPageClassification: page.errorPageClassification,
+      errorPageSignals: page.errorPageSignals,
+      errorPageReason: page.errorPageReason,
+      evidenceSources,
+    };
+  });
+}
+
 export async function writeReviewInput(
   filePath: string,
   args: {
@@ -97,6 +218,16 @@ export async function writeReviewInput(
     // run produced no network-evidence.jsonl at all — kept out of the document in that case for
     // backward compatibility with pre-CF-02 runs.
     networkEvidenceIndexPath?: string;
+    // FIX-01: the parsed/validated network-evidence.jsonl records for this run (already read and
+    // validated by post-run-review.ts's validateNetworkEvidenceIndex() before this call), used to
+    // build the per-page join below. Empty/omitted when this run produced no network-evidence.jsonl.
+    networkEvidenceRecords?: NetworkEvidenceRecord[];
+    // FIX-06: the parsed/validated interactions.jsonl records for this run (already read and
+    // validated by post-run-review.ts's validateInteractionRecordsForReview() before this call —
+    // any passive/executed contract violation has already thrown before reaching here), used to
+    // build the per-page interaction-state join in pageEvidence below. Empty/omitted for a
+    // passive_only run or a run that produced no interactions.jsonl at all.
+    interactionRecords?: InteractionCandidateRecord[];
   },
 ): Promise<WriteReviewInputResult> {
   const templates = await listTemplateFiles(args.templateDir);
@@ -132,8 +263,17 @@ export async function writeReviewInput(
   // of the total number of discovered technical URLs. Rejected/TBD rows (where asset/API noise
   // lives) are never inlined in full; only grouped counts + capped samples per ruleId, plus the
   // path to the full inventory above.
+  // FIX-06: the complete per-visited-page evidence graph, built before the gate below so a
+  // dangling reference (HTML/trace/network body missing on disk) fails the whole review gate
+  // instead of ever being written into review-input.json.
+  const pageEvidence = buildPageEvidenceGraph(args.visited, args.networkEvidenceRecords ?? [], args.interactionRecords ?? []);
+  // FIX-06: every referenced evidence file must exist and every interaction-state reference must
+  // trace to a real executed interaction record — validatePageEvidenceGraph throws
+  // PostRunReviewGateError (never silently skips) on the first violation found.
+  validatePageEvidenceGraph(pageEvidence);
+
   const reviewInput: ReviewInputDocument = {
-    schemaVersion: '1.2',
+    schemaVersion: '1.4',
     runId: args.runId,
     entryUrl: args.entryUrl,
     geo: args.geo,
@@ -141,6 +281,12 @@ export async function writeReviewInput(
     templateFiles: templates,
     // CF-03: on-disk reference only — the index/body files themselves are never inlined here.
     networkEvidenceIndexPath: args.networkEvidenceIndexPath,
+    // FIX-01: bounded per-page join derived from the same records CF-03's gate already
+    // validated (every referenced bodyPath is confirmed to exist on disk before this runs).
+    pageNetworkEvidence: buildPageNetworkEvidence(args.visited, args.networkEvidenceRecords ?? []),
+    // FIX-06: the complete per-page evidence graph (html/network/interaction-state references,
+    // error classification, exact requested/final URL, and evidenceSources provenance).
+    pageEvidence,
     visitedPages: args.visited,
     urlCounts: {
       discovered: args.decisions.length,
@@ -149,6 +295,7 @@ export async function writeReviewInput(
       tbd: tbd.length,
       visited: args.visited.filter((row) => row.status === 'visited').length,
       failed: args.visited.filter((row) => row.status === 'failed').length,
+      suspectedErrorPages: args.visited.filter((row) => row.errorPageClassification === 'suspected_error_page').length,
     },
     acceptedTargets: accepted.map((row) => ({
       rawUrl: row.rawUrl,
@@ -172,6 +319,10 @@ export async function writeReviewInput(
       urlSections: 'Show discovered/accepted/rejected/TBD/visited/failed URL counts separately. rejectedByRule/tbdByRule and rejectedSamples/tbdSamples are grouped/bounded summaries of the rejected and TBD sets, not the complete sets.',
       fullInventory: 'The complete, unbounded, full-provenance rejected/TBD/accepted decision set is at fullUrlInventoryPath (url-inventory.json), on disk beside this file. Read it only if you need evidence beyond the grouped counts/samples above.',
       networkEvidence: 'Factual evidence order: (1) saved page corpus/HTML, (2) interaction/passive trace evidence, (3) same-origin captured network evidence associated with that visited page. When networkEvidenceIndexPath (network-evidence.jsonl) is present, a JSON-template field may cite a captured network evidence record/body path when the value is absent from the rendered DOM but present in a browser-observed response for that same visited page. A captured network response never proves that an unvisited document URL was visited, and never substitutes for saved corpus/HTML or trace evidence when both exist. Cite it as: visited page URL, request URL, and the network evidence body/index reference.',
+      // FIX-06: the complete evidence-graph entry point and its provenance/interaction semantics.
+      evidenceGraph: 'pageEvidence carries one entry per visited page with explicit references (never inlined bodies/full text): htmlSnapshotPath, passiveTracePath, networkEvidenceRecords, interactionStateRecords, errorPageClassification/errorPageSignals/errorPageReason, and evidenceSources (html/network/interaction_state, possibly several at once). Use HTML + network + behavior/trace + interaction-state evidence together — a fact may come from a captured JSON response (networkEvidenceRecords) even when it is absent from the visible rendered baseline text, as long as the response was observed on that same visited page.',
+      interactionState: 'interactionStateRecords on a pageEvidence entry are ALWAYS drawn from a real, executed bounded_reveal interaction record (ExecutedCandidateRow) for that page — never from a passive observation candidate. A passive candidate (detected_candidate_only / detector_error) is never interaction success and must never be reported as one; report it only as "candidate detected". Action-derived evidence (e.g. content revealed by a tab/accordion/select/combobox/load-more control) is valid only when it is backed by a real interactionStateRecords entry for that page — never inferred from the mere presence of a passive trace candidate.',
+      absentEvidence: 'blocked, unsupported, timeout, and any other non-revealing executed-interaction outcome must remain reported as missing/absent evidence for that candidate — never inferred or guessed into a positive fact. Keep absent/blocked/unsupported evidence visibly distinct from positive facts in the review output; do not silently fold them together.',
     },
   };
   await writeJsonAtomic(filePath, reviewInput);

@@ -4,6 +4,8 @@ import {
   DEFAULT_RUNTIME_BUDGETS,
   resolveRuntimeBudgets,
   parseRuntimeBudgetOverridesFromArgs,
+  DEFAULT_NETWORK_EVIDENCE_LIMITS,
+  resolveNetworkEvidenceLimits,
   ProgressWatchdog,
   NoProgressError,
 } from './runtime-config.ts';
@@ -41,6 +43,29 @@ test('resolveRuntimeBudgets: an override replaces only its own key, every other 
 
 test('resolveRuntimeBudgets: rejects a negative override rather than silently accepting it', () => {
   assert.throws(() => resolveRuntimeBudgets({ navigationTimeoutMs: -1 }), /Invalid runtime budget override/);
+});
+
+// FIX-01: configurable size/count limits for CF-02's network-evidence capture.
+
+test('DEFAULT_NETWORK_EVIDENCE_LIMITS matches the FIX-01 documented defaults', () => {
+  assert.deepEqual(DEFAULT_NETWORK_EVIDENCE_LIMITS, {
+    maxBodyBytes: 10 * 1024 * 1024,
+    maxRecordsPerPage: 200,
+  });
+});
+
+test('resolveNetworkEvidenceLimits: no overrides returns the defaults unchanged', () => {
+  assert.deepEqual(resolveNetworkEvidenceLimits(), DEFAULT_NETWORK_EVIDENCE_LIMITS);
+});
+
+test('resolveNetworkEvidenceLimits: an override replaces only its own key, the other limit keeps its default', () => {
+  const resolved = resolveNetworkEvidenceLimits({ maxRecordsPerPage: 5 });
+  assert.equal(resolved.maxRecordsPerPage, 5);
+  assert.equal(resolved.maxBodyBytes, DEFAULT_NETWORK_EVIDENCE_LIMITS.maxBodyBytes);
+});
+
+test('resolveNetworkEvidenceLimits: rejects a negative override rather than silently accepting it', () => {
+  assert.throws(() => resolveNetworkEvidenceLimits({ maxBodyBytes: -1 }), /Invalid network evidence limit override/);
 });
 
 test('parseRuntimeBudgetOverridesFromArgs: maps every documented CLI flag to its budget key', () => {
