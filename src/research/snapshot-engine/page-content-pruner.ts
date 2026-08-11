@@ -10,23 +10,11 @@ import type { InteractionExecutionRecord } from './types.ts';
 // compact, text-first markdown document. The actual LLM review/JSON-building step that reads this
 // corpus is a later ticket (CD-N06) — this module only has to produce it correctly.
 
-const NOISE_SELECTOR = [
-  'script',
-  'style',
-  'noscript',
-  'template',
-  'img',
-  'picture',
-  'svg',
-  'video',
-  'audio',
-  'canvas',
-  'source',
-  'track',
-  'link',
-  'meta',
-  'iframe',
-].join(', ');
+const MEDIA_SELECTOR = ['img', 'picture', 'svg', 'video', 'audio', 'canvas', 'source', 'track'].join(', ');
+
+// Non-media noise: removed up front, before media-label preservation, so tracking/consent/
+// script/link/meta/iframe markup never contributes accessible-label text either.
+const NOISE_SELECTOR = ['script', 'style', 'noscript', 'template', 'link', 'meta', 'iframe'].join(', ');
 
 // Global, duplicated-on-every-page chrome. Category/sub-category rails and in-page content
 // navigation deliberately do NOT match this — only the semantic "this is sitewide chrome" tags/
@@ -96,6 +84,35 @@ function isWithinRevealedContainer($: cheerio.CheerioAPI, el: Element, revealedS
   return false;
 }
 
+// CF-01: image nodes carry accessible meaning through their attributes, not their pixels. Before
+// a media node is dropped, replace it with a plain text node holding its accessible label — first
+// non-empty of aria-label, alt, title (in that priority order), whitespace-normalized. This never
+// interprets the label text, and it never retains src/srcset/any image URL or binary data. A
+// decorative image (empty/missing alt, no aria-label/title) contributes no text, matching the
+// visible-content-only semantics the rest of this module already applies to other markup.
+function mediaAccessibleLabel($el: cheerio.Cheerio<Element>): string {
+  const ariaLabel = collapseWhitespace($el.attr('aria-label') ?? '');
+  if (ariaLabel) return ariaLabel;
+  const alt = collapseWhitespace($el.attr('alt') ?? '');
+  if (alt) return alt;
+  const title = collapseWhitespace($el.attr('title') ?? '');
+  if (title) return title;
+  return '';
+}
+
+// Replaces every remaining (i.e. not-already-pruned-as-chrome/hidden) media node with a text node
+// carrying its accessible label, when it has one. Must run after chrome/tracking/consent/hidden
+// removal (so a header/footer logo or a hidden image never contributes text) and before media
+// nodes are removed outright.
+function preserveMediaLabels($: cheerio.CheerioAPI): void {
+  $(MEDIA_SELECTOR).each((_, node) => {
+    if (node.type !== 'tag') return;
+    const $el = $(node);
+    const label = mediaAccessibleLabel($el);
+    if (label) $el.replaceWith($('<span></span>').text(label));
+  });
+}
+
 // CD-N05 structural cleanup pass, mutating `$` in place. Removes: script/style/noscript;
 // images/picture/svg/video/audio/canvas; iframes (frame *content* capture is out of scope for
 // this run — see module comment); tracking/analytics markup; duplicated global header/nav/
@@ -125,6 +142,11 @@ function cleanDom($: cheerio.CheerioAPI, revealedSelectors: string[]): void {
     if (isWithinRevealedContainer($, node, revealedSelectors)) return;
     $(node).remove();
   });
+
+  // Media nodes last: chrome/tracking/consent/hidden markup is already gone, so only genuinely
+  // visible-content images/svgs/etc remain to have their accessible label preserved before removal.
+  preserveMediaLabels($);
+  $(MEDIA_SELECTOR).remove();
 }
 
 function renderTable($: cheerio.CheerioAPI, $table: cheerio.Cheerio<Element>): string {

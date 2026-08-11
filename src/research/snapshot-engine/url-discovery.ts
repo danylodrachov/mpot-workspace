@@ -1,7 +1,9 @@
+import path from 'node:path';
 import type { BrowserContext, Frame, Page, Request, Response, WebSocket } from 'playwright';
 import { scanUrlTokens } from './token-scan.ts';
-import type { RawUrlCandidate, SourceFamily } from './types.ts';
+import type { NetworkEvidenceRecord, RawUrlCandidate, SourceFamily } from './types.ts';
 import { DEFAULT_RUNTIME_BUDGETS } from './runtime-config.ts';
+import { appendJsonLine, sha256, writeTextAtomic } from './io.ts';
 
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
 const TEXTUAL_CONTENT_TYPE = /(?:json|javascript|ecmascript|text\/|xml|svg)/i;
@@ -241,6 +243,147 @@ async function scanResponseBody(
   }
 }
 
+// CF-02: run-scoped sink for persisting bounded same-origin xhr/fetch response bodies as
+// factual evidence, separate from the URL-token discovery above (which is left unchanged).
+export interface NetworkEvidenceOptions {
+  evidenceDir: string;
+  evidenceIndexPath: string;
+}
+
+function contentTypeExtension(contentType: string | undefined): string {
+  if (contentType && /json/i.test(contentType)) return 'json';
+  if (contentType && /xml/i.test(contentType)) return 'xml';
+  return 'txt';
+}
+
+async function appendNetworkEvidenceRecord(evidenceIndexPath: string, record: NetworkEvidenceRecord): Promise<void> {
+  try {
+    await appendJsonLine(evidenceIndexPath, record);
+  } catch {
+    // A failure to write the evidence index must never fail the page visit (CF-02 constraint).
+  }
+}
+
+// CF-02: eligibility is narrower than the existing URL-token body scan above — same-origin,
+// resourceType xhr/fetch, textual content-type, successful HTTP response, bounded size/timeout.
+// Cross-origin and non-xhr/fetch traffic is never a candidate at all (no index record).
+async function captureNetworkEvidence(
+  response: Response,
+  allowedHostname: string,
+  observedOnPageUrl: string,
+  options: NetworkEvidenceOptions,
+  bodyHashCache: Map<string, string>,
+  timeoutMs: number,
+): Promise<void> {
+  const request = response.request();
+  const resourceType = request.resourceType();
+  if (resourceType !== 'xhr' && resourceType !== 'fetch') return;
+
+  let url: URL;
+  try {
+    url = new URL(response.url());
+  } catch {
+    return;
+  }
+  if (!hostnameInScope(url.hostname, allowedHostname)) return;
+
+  const requestUrl = response.url();
+  // CF-02: a capture failure must never fail the page visit — tolerate minimal test/fixture
+  // Request doubles that don't implement every real-Playwright method.
+  const requestMethod = typeof request.method === 'function' ? request.method() : 'GET';
+  const status = typeof response.status === 'function' ? response.status() : 200;
+  const contentType = response.headers()['content-type'];
+  const capturedAt = new Date().toISOString();
+  const baseRecord = {
+    schemaVersion: '1.0' as const,
+    observedOnPageUrl,
+    requestUrl,
+    requestMethod,
+    resourceType,
+    status,
+    contentType,
+    capturedAt,
+  };
+
+  try {
+    if (status < 200 || status >= 300) {
+      await appendNetworkEvidenceRecord(options.evidenceIndexPath, {
+        ...baseRecord,
+        outcome: 'skipped',
+        reason: `non-success HTTP status ${status}`,
+      });
+      return;
+    }
+    if (!TEXTUAL_CONTENT_TYPE.test(contentType ?? '')) {
+      await appendNetworkEvidenceRecord(options.evidenceIndexPath, {
+        ...baseRecord,
+        outcome: 'skipped',
+        reason: `unsupported content-type${contentType ? `: ${contentType}` : ''}`,
+      });
+      return;
+    }
+    const declaredLength = Number(response.headers()['content-length'] ?? '0');
+    if (declaredLength > MAX_BODY_BYTES) {
+      await appendNetworkEvidenceRecord(options.evidenceIndexPath, {
+        ...baseRecord,
+        outcome: 'skipped',
+        reason: `declared content-length ${declaredLength} exceeds ${MAX_BODY_BYTES} byte limit`,
+      });
+      return;
+    }
+
+    let body: Buffer;
+    try {
+      body = await withTimeout(
+        response.body(),
+        timeoutMs,
+        `Network evidence capture exceeded ${timeoutMs}ms deadline for ${requestUrl}`,
+      );
+    } catch (error) {
+      const isTimeout = error instanceof TimeoutError;
+      await appendNetworkEvidenceRecord(options.evidenceIndexPath, {
+        ...baseRecord,
+        outcome: isTimeout ? 'timeout' : 'error',
+        reason: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+
+    if (body.byteLength > MAX_BODY_BYTES) {
+      await appendNetworkEvidenceRecord(options.evidenceIndexPath, {
+        ...baseRecord,
+        outcome: 'skipped',
+        reason: `body ${body.byteLength} bytes exceeds ${MAX_BODY_BYTES} byte limit`,
+      });
+      return;
+    }
+
+    // CF-02: raw textual body stored exactly as received; identical bodies observed earlier in
+    // this run are deduplicated by content hash rather than re-written to disk.
+    const hash = sha256(body);
+    let bodyPath = bodyHashCache.get(hash);
+    if (!bodyPath) {
+      bodyPath = path.join(options.evidenceDir, `${hash}.${contentTypeExtension(contentType)}`);
+      await writeTextAtomic(bodyPath, body.toString('utf8'));
+      bodyHashCache.set(hash, bodyPath);
+    }
+
+    await appendNetworkEvidenceRecord(options.evidenceIndexPath, {
+      ...baseRecord,
+      bodyPath,
+      bodySha256: hash,
+      bodyBytes: body.byteLength,
+      outcome: 'captured',
+    });
+  } catch (error) {
+    await appendNetworkEvidenceRecord(options.evidenceIndexPath, {
+      ...baseRecord,
+      outcome: 'error',
+      reason: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 export class PassiveNetworkObserver {
   private readonly pending = new Set<Promise<void>>();
   private currentPageUrl = '';
@@ -261,6 +404,9 @@ export class PassiveNetworkObserver {
   private readonly allowedHostname: string;
   private readonly flushDeadlineMs: number;
   private readonly responseBodyTimeoutMs: number;
+  private readonly networkEvidence?: NetworkEvidenceOptions;
+  // CF-02: dedupe identical response bodies by content hash within this run's observer lifetime.
+  private readonly evidenceBodyHashCache = new Map<string, string>();
 
   constructor(
     page: Page,
@@ -268,12 +414,14 @@ export class PassiveNetworkObserver {
     allowedHostname: string,
     flushDeadlineMs: number = FLUSH_DEADLINE_MS,
     responseBodyTimeoutMs: number = RESPONSE_BODY_TIMEOUT_MS,
+    networkEvidence?: NetworkEvidenceOptions,
   ) {
     this.page = page;
     this.sink = sink;
     this.allowedHostname = allowedHostname;
     this.flushDeadlineMs = flushDeadlineMs;
     this.responseBodyTimeoutMs = responseBodyTimeoutMs;
+    this.networkEvidence = networkEvidence;
   }
 
   start(): void {
@@ -314,6 +462,18 @@ export class PassiveNetworkObserver {
     this.sink.recordRun('network_response', { status: 'complete' });
     const task = scanResponseBody(response, this.sink, this.allowedHostname, this.responseBodyTimeoutMs).finally(() => this.pending.delete(task));
     this.pending.add(task);
+    if (this.networkEvidence) {
+      const observedOnPageUrl = response.frame()?.url() ?? this.currentPageUrl;
+      const evidenceTask = captureNetworkEvidence(
+        response,
+        this.allowedHostname,
+        observedOnPageUrl,
+        this.networkEvidence,
+        this.evidenceBodyHashCache,
+        this.responseBodyTimeoutMs,
+      ).finally(() => this.pending.delete(evidenceTask));
+      this.pending.add(evidenceTask);
+    }
   };
 
   private readonly onRequestFailed = () => {

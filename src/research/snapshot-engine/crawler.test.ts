@@ -731,8 +731,12 @@ test('CD-N01: run folder is named <casino-slug>-<geo>-<date>-<time>, retains exa
   const entries = fs.readdirSync(runDir).sort();
   assert.deepEqual(
     entries,
-    ['corpus', 'interactions.jsonl', 'json', 'pages.jsonl', 'review.html', 'run-manifest.json', 'url-inventory.json'].sort(),
-    'expected exactly the 7-item retained contract at the run folder root, with debug diagnostics discarded (no --debug-artifacts, ordinary success)',
+    // CF-02: adds a run-scoped `network/` evidence directory to the retained contract (bounded
+    // same-origin xhr/fetch response bodies). `network-evidence.jsonl` itself is only written
+    // once at least one eligible response is observed, so it is absent from this no-network-
+    // traffic fixture.
+    ['corpus', 'interactions.jsonl', 'json', 'network', 'pages.jsonl', 'review.html', 'run-manifest.json', 'url-inventory.json'].sort(),
+    'expected the retained contract at the run folder root, with debug diagnostics discarded (no --debug-artifacts, ordinary success)',
   );
   assert.ok(fs.statSync(path.join(runDir, 'corpus')).isDirectory());
   assert.ok(fs.statSync(path.join(runDir, 'json')).isDirectory());
@@ -793,4 +797,384 @@ test('CD-N01: a partial run packages debug.zip unconditionally, without --debug-
   assert.equal(fs.existsSync(path.join(runDir, 'debug')), false, 'raw debug directory must never survive a partial run');
   assert.ok(fs.existsSync(path.join(runDir, 'debug.zip')), 'expected debug.zip on a partial run even without --debug-artifacts');
   assert.equal(manifest.artifacts.debugZip, path.join(runDir, 'debug.zip'));
+});
+
+// CF-02: bounded same-origin network response bodies observed while visiting an accepted page
+// must be persisted alongside (not instead of) the existing URL-token discovery, without ever
+// promoting the observed request URL itself into a document navigation target.
+function readJsonl<T>(filePath: string): T[] {
+  if (!fs.existsSync(filePath)) return [];
+  const raw = fs.readFileSync(filePath, 'utf-8').trim();
+  return raw.length > 0 ? (raw.split('\n').map((line) => JSON.parse(line)) as T[]) : [];
+}
+
+interface FakeNetworkEvidenceRecord {
+  requestUrl: string;
+  outcome: string;
+  bodyPath?: string;
+  bodySha256?: string;
+  reason?: string;
+}
+
+function fireResponse(
+  listeners: Map<string, (...args: unknown[]) => void>,
+  options: {
+    url: string;
+    contentType: string;
+    resourceType: string;
+    status?: number;
+    method?: string;
+    body: () => Promise<Buffer>;
+    pageUrl?: string;
+  },
+) {
+  listeners.get('response')?.({
+    url: () => options.url,
+    headers: () => ({ 'content-type': options.contentType }),
+    status: () => options.status ?? 200,
+    body: options.body,
+    request: () => ({ resourceType: () => options.resourceType, method: () => options.method ?? 'GET' }),
+    frame: () => ({ url: () => options.pageUrl ?? 'https://example.test/' }),
+  });
+}
+
+test('CF-02: a same-origin JSON xhr response body is persisted and indexed in network-evidence.jsonl', async () => {
+  const callLog: string[] = [];
+  const entryUrl = 'https://example.test/';
+  const { page, context, listeners } = makeFakeEnvironment({ entryUrl, bootstrapLinks: ['/promotions'], callLog });
+
+  const originalGoto = (page as unknown as { goto: (url: string) => Promise<{ status: () => number }> }).goto;
+  let fired = false;
+  (page as unknown as { goto: (url: string) => Promise<{ status: () => number }> }).goto = async (url: string) => {
+    const result = await originalGoto(url);
+    if (!fired) {
+      fired = true;
+      fireResponse(listeners, {
+        url: 'https://example.test/api/v3/promotion/list?x=1',
+        contentType: 'application/json',
+        resourceType: 'xhr',
+        body: async () => Buffer.from(JSON.stringify({ promotions: [{ name: 'Welcome Bonus' }] })),
+      });
+    }
+    return result;
+  };
+
+  const outputDir = makeOutputDir();
+  const manifest = await crawlSite({ context, page, entryUrl, casinoName: 'Example Casino', outputDir, settleMs: 0, navigationTimeoutMs: 1000 });
+  const runDir = runDirOf(outputDir, manifest);
+
+  const records = readJsonl<FakeNetworkEvidenceRecord>(path.join(runDir, 'network-evidence.jsonl'));
+  const record = records.find((row) => row.requestUrl === 'https://example.test/api/v3/promotion/list?x=1');
+  assert.ok(record, 'expected a network-evidence.jsonl record for the observed promotion API response');
+  assert.equal(record?.outcome, 'captured');
+  assert.ok(record?.bodyPath && fs.existsSync(record.bodyPath), 'expected the captured body file to exist on disk');
+  assert.ok(fs.readFileSync(record!.bodyPath!, 'utf-8').includes('Welcome Bonus'));
+
+  // CF-02 boundary: the observed API URL must never be promoted into the accepted document
+  // visit queue, even though its response body was captured as evidence.
+  const inventory = JSON.parse(fs.readFileSync(path.join(runDir, 'url-inventory.json'), 'utf-8')) as {
+    accepted: Array<{ canonicalUrl?: string; rawUrl: string }>;
+  };
+  assert.ok(
+    !inventory.accepted.some((row) => (row.canonicalUrl ?? row.rawUrl).includes('/api/v3/promotion/list')),
+    'the /api/... URL must remain TBD/rejected, never accepted for document crawl',
+  );
+});
+
+test('CF-02: a same-origin text fetch response body is persisted and indexed', async () => {
+  const callLog: string[] = [];
+  const entryUrl = 'https://example.test/';
+  const { page, context, listeners } = makeFakeEnvironment({ entryUrl, bootstrapLinks: ['/payments'], callLog });
+
+  const originalGoto = (page as unknown as { goto: (url: string) => Promise<{ status: () => number }> }).goto;
+  let fired = false;
+  (page as unknown as { goto: (url: string) => Promise<{ status: () => number }> }).goto = async (url: string) => {
+    const result = await originalGoto(url);
+    if (!fired) {
+      fired = true;
+      fireResponse(listeners, {
+        url: 'https://example.test/cashbox/paymentsystem',
+        contentType: 'text/plain',
+        resourceType: 'fetch',
+        body: async () => Buffer.from('Visa,Mastercard'),
+      });
+    }
+    return result;
+  };
+
+  const outputDir = makeOutputDir();
+  const manifest = await crawlSite({ context, page, entryUrl, casinoName: 'Example Casino', outputDir, settleMs: 0, navigationTimeoutMs: 1000 });
+  const runDir = runDirOf(outputDir, manifest);
+
+  const records = readJsonl<FakeNetworkEvidenceRecord>(path.join(runDir, 'network-evidence.jsonl'));
+  const record = records.find((row) => row.requestUrl === 'https://example.test/cashbox/paymentsystem');
+  assert.equal(record?.outcome, 'captured');
+  assert.ok(record?.bodyPath && fs.readFileSync(record.bodyPath, 'utf-8').includes('Visa'));
+});
+
+test('CF-02: an image response is never persisted as network evidence', async () => {
+  const callLog: string[] = [];
+  const entryUrl = 'https://example.test/';
+  const { page, context, listeners } = makeFakeEnvironment({ entryUrl, bootstrapLinks: ['/promotions'], callLog });
+
+  const originalGoto = (page as unknown as { goto: (url: string) => Promise<{ status: () => number }> }).goto;
+  let fired = false;
+  (page as unknown as { goto: (url: string) => Promise<{ status: () => number }> }).goto = async (url: string) => {
+    const result = await originalGoto(url);
+    if (!fired) {
+      fired = true;
+      fireResponse(listeners, {
+        url: 'https://example.test/visa-logo.png',
+        contentType: 'image/png',
+        resourceType: 'image',
+        body: async () => Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+      });
+    }
+    return result;
+  };
+
+  const outputDir = makeOutputDir();
+  const manifest = await crawlSite({ context, page, entryUrl, casinoName: 'Example Casino', outputDir, settleMs: 0, navigationTimeoutMs: 1000 });
+  const runDir = runDirOf(outputDir, manifest);
+
+  const records = readJsonl<FakeNetworkEvidenceRecord>(path.join(runDir, 'network-evidence.jsonl'));
+  assert.equal(
+    records.some((row) => row.requestUrl === 'https://example.test/visa-logo.png'),
+    false,
+    'a non-xhr/fetch image response must never produce a network-evidence record',
+  );
+});
+
+test('CF-02: a cross-origin xhr response is never persisted as network evidence', async () => {
+  const callLog: string[] = [];
+  const entryUrl = 'https://example.test/';
+  const { page, context, listeners } = makeFakeEnvironment({ entryUrl, bootstrapLinks: ['/promotions'], callLog });
+
+  const originalGoto = (page as unknown as { goto: (url: string) => Promise<{ status: () => number }> }).goto;
+  let fired = false;
+  (page as unknown as { goto: (url: string) => Promise<{ status: () => number }> }).goto = async (url: string) => {
+    const result = await originalGoto(url);
+    if (!fired) {
+      fired = true;
+      fireResponse(listeners, {
+        url: 'https://analytics.other-domain.test/collect',
+        contentType: 'application/json',
+        resourceType: 'xhr',
+        body: async () => Buffer.from('{"ok":true}'),
+      });
+    }
+    return result;
+  };
+
+  const outputDir = makeOutputDir();
+  const manifest = await crawlSite({ context, page, entryUrl, casinoName: 'Example Casino', outputDir, settleMs: 0, navigationTimeoutMs: 1000 });
+  const runDir = runDirOf(outputDir, manifest);
+
+  const records = readJsonl<FakeNetworkEvidenceRecord>(path.join(runDir, 'network-evidence.jsonl'));
+  assert.equal(
+    records.some((row) => row.requestUrl === 'https://analytics.other-domain.test/collect'),
+    false,
+    'a cross-origin response must never produce a network-evidence record',
+  );
+});
+
+test('CF-02: an oversized response body is skipped with an explicit reason, not silently dropped', async () => {
+  const callLog: string[] = [];
+  const entryUrl = 'https://example.test/';
+  const { page, context, listeners } = makeFakeEnvironment({ entryUrl, bootstrapLinks: ['/promotions'], callLog });
+
+  const originalGoto = (page as unknown as { goto: (url: string) => Promise<{ status: () => number }> }).goto;
+  let fired = false;
+  (page as unknown as { goto: (url: string) => Promise<{ status: () => number }> }).goto = async (url: string) => {
+    const result = await originalGoto(url);
+    if (!fired) {
+      fired = true;
+      fireResponse(listeners, {
+        url: 'https://example.test/api/v3/huge',
+        contentType: 'application/json',
+        resourceType: 'fetch',
+        body: async () => Buffer.alloc(11 * 1024 * 1024, 'a'),
+      });
+    }
+    return result;
+  };
+
+  const outputDir = makeOutputDir();
+  const manifest = await crawlSite({ context, page, entryUrl, casinoName: 'Example Casino', outputDir, settleMs: 0, navigationTimeoutMs: 1000 });
+  const runDir = runDirOf(outputDir, manifest);
+
+  const records = readJsonl<FakeNetworkEvidenceRecord>(path.join(runDir, 'network-evidence.jsonl'));
+  const record = records.find((row) => row.requestUrl === 'https://example.test/api/v3/huge');
+  assert.equal(record?.outcome, 'skipped');
+  assert.ok(record?.reason && /exceeds/.test(record.reason));
+});
+
+test('CF-02: a timed-out network evidence capture produces a terminal timeout record, not a hang', async () => {
+  const callLog: string[] = [];
+  const entryUrl = 'https://example.test/';
+  const { page, context, listeners } = makeFakeEnvironment({ entryUrl, bootstrapLinks: ['/promotions'], callLog });
+
+  const originalGoto = (page as unknown as { goto: (url: string) => Promise<{ status: () => number }> }).goto;
+  let fired = false;
+  (page as unknown as { goto: (url: string) => Promise<{ status: () => number }> }).goto = async (url: string) => {
+    const result = await originalGoto(url);
+    if (!fired) {
+      fired = true;
+      fireResponse(listeners, {
+        url: 'https://example.test/api/v3/bonus/list',
+        contentType: 'application/json',
+        resourceType: 'xhr',
+        body: () => new Promise<Buffer>(() => {
+          /* stuck forever, simulating a hung evidence body fetch */
+        }),
+      });
+    }
+    return result;
+  };
+
+  const outputDir = makeOutputDir();
+  const manifest = await crawlSite({
+    context,
+    page,
+    entryUrl,
+    casinoName: 'Example Casino',
+    outputDir,
+    settleMs: 0,
+    navigationTimeoutMs: 1000,
+    runtimeBudgetOverrides: { responseBodyScanTimeoutMs: 50, networkObserverFlushTimeoutMs: 300 },
+  });
+  const runDir = runDirOf(outputDir, manifest);
+
+  const records = readJsonl<FakeNetworkEvidenceRecord>(path.join(runDir, 'network-evidence.jsonl'));
+  const record = records.find((row) => row.requestUrl === 'https://example.test/api/v3/bonus/list');
+  assert.equal(record?.outcome, 'timeout');
+});
+
+// CF-03: the deterministic review handoff must reference CF-02's network-evidence.jsonl by path
+// (never inline the captured bodies), and validate every 'captured' record's body file exists
+// before handing anything to the reviewer.
+function readReviewInput(runDir: string): {
+  schemaVersion: string;
+  networkEvidenceIndexPath?: string;
+} {
+  const debugDir = path.join(runDir, 'debug');
+  const candidate = fs.existsSync(debugDir)
+    ? path.join(debugDir, 'review-input.json')
+    : path.join(runDir, 'review-input.json');
+  return JSON.parse(fs.readFileSync(candidate, 'utf-8'));
+}
+
+test('CF-03: a terminal run with captured network evidence assembles review-input.json referencing the index, not embedding bodies', async () => {
+  const callLog: string[] = [];
+  const entryUrl = 'https://example.test/';
+  const { page, context, listeners } = makeFakeEnvironment({ entryUrl, bootstrapLinks: ['/promotions'], callLog });
+
+  const originalGoto = (page as unknown as { goto: (url: string) => Promise<{ status: () => number }> }).goto;
+  let fired = false;
+  (page as unknown as { goto: (url: string) => Promise<{ status: () => number }> }).goto = async (url: string) => {
+    const result = await originalGoto(url);
+    if (!fired) {
+      fired = true;
+      fireResponse(listeners, {
+        url: 'https://example.test/api/v3/promotion/list?x=1',
+        contentType: 'application/json',
+        resourceType: 'xhr',
+        body: async () => Buffer.from(JSON.stringify({ promotions: [{ name: 'Welcome Bonus' }] })),
+      });
+    }
+    return result;
+  };
+
+  const outputDir = makeOutputDir();
+  const manifest = await crawlSite({
+    context,
+    page,
+    entryUrl,
+    casinoName: 'Example Casino',
+    outputDir,
+    settleMs: 0,
+    navigationTimeoutMs: 1000,
+    debugArtifacts: true,
+  });
+  const runDir = runDirOf(outputDir, manifest);
+
+  const networkEvidencePath = path.join(runDir, 'network-evidence.jsonl');
+  assert.ok(fs.existsSync(networkEvidencePath), 'expected network-evidence.jsonl to exist for this run');
+
+  const reviewInput = readReviewInput(runDir);
+  assert.equal(reviewInput.schemaVersion, '1.2');
+  assert.equal(
+    reviewInput.networkEvidenceIndexPath,
+    networkEvidencePath,
+    'expected review-input.json to reference network-evidence.jsonl by path',
+  );
+
+  const rawReviewInput = fs.readFileSync(
+    fs.existsSync(path.join(runDir, 'debug')) ? path.join(runDir, 'debug', 'review-input.json') : path.join(runDir, 'review-input.json'),
+    'utf-8',
+  );
+  assert.ok(
+    !rawReviewInput.includes('Welcome Bonus'),
+    'the captured response body must never be inlined into review-input.json — the reviewer reads it from disk via the index',
+  );
+});
+
+test('CF-03: a run without any captured network traffic remains backward-compatible (no networkEvidenceIndexPath)', async () => {
+  const callLog: string[] = [];
+  const entryUrl = 'https://example.test/';
+  const { page, context } = makeFakeEnvironment({ entryUrl, bootstrapLinks: ['/bonuses'], callLog });
+
+  const outputDir = makeOutputDir();
+  const manifest = await crawlSite({
+    context,
+    page,
+    entryUrl,
+    casinoName: 'Example Casino',
+    outputDir,
+    settleMs: 0,
+    navigationTimeoutMs: 1000,
+    debugArtifacts: true,
+  });
+  const runDir = runDirOf(outputDir, manifest);
+
+  assert.equal(fs.existsSync(path.join(runDir, 'network-evidence.jsonl')), false);
+  const reviewInput = readReviewInput(runDir);
+  assert.equal(reviewInput.networkEvidenceIndexPath, undefined);
+});
+
+test('CF-03: a captured network-evidence record pointing at a missing body file fails the review gate', async () => {
+  const callLog: string[] = [];
+  const entryUrl = 'https://example.test/';
+  const { page, context, listeners } = makeFakeEnvironment({ entryUrl, bootstrapLinks: ['/promotions'], callLog });
+
+  const originalGoto = (page as unknown as { goto: (url: string) => Promise<{ status: () => number }> }).goto;
+  let fired = false;
+  (page as unknown as { goto: (url: string) => Promise<{ status: () => number }> }).goto = async (url: string) => {
+    const result = await originalGoto(url);
+    if (!fired) {
+      fired = true;
+      fireResponse(listeners, {
+        url: 'https://example.test/api/v3/promotion/list?x=1',
+        contentType: 'application/json',
+        resourceType: 'xhr',
+        body: async () => Buffer.from(JSON.stringify({ promotions: [{ name: 'Welcome Bonus' }] })),
+      });
+    }
+    return result;
+  };
+
+  const outputDir = makeOutputDir();
+  const manifest = await crawlSite({ context, page, entryUrl, casinoName: 'Example Casino', outputDir, settleMs: 0, navigationTimeoutMs: 1000 });
+  const runDir = runDirOf(outputDir, manifest);
+
+  // The run itself completed with a valid, fully-backed index. Simulate the failure mode the
+  // gate exists to catch: a 'captured' record whose body file has since gone missing.
+  const indexPath = path.join(runDir, 'network-evidence.jsonl');
+  const records = readJsonl<FakeNetworkEvidenceRecord>(indexPath);
+  const captured = records.find((row) => row.outcome === 'captured' && row.bodyPath);
+  assert.ok(captured?.bodyPath, 'expected at least one captured record with a body file');
+  fs.rmSync(captured!.bodyPath!);
+
+  const { validateNetworkEvidenceIndex, PostRunReviewGateError } = await import('./post-run-review.ts');
+  await assert.rejects(async () => validateNetworkEvidenceIndex(indexPath), PostRunReviewGateError);
 });

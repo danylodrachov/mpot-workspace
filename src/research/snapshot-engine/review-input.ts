@@ -91,6 +91,12 @@ export async function writeReviewInput(
     // post-run-review.ts regenerating review-input.json inside an existing run directory) keep
     // their previous behavior unchanged.
     urlInventoryPath?: string;
+    // CF-03: path to <runDir>/network-evidence.jsonl, passed by the caller only after
+    // post-run-review.ts's validateNetworkEvidenceIndex() has confirmed the index (when present)
+    // is internally consistent (every captured record's body file exists). Undefined when this
+    // run produced no network-evidence.jsonl at all — kept out of the document in that case for
+    // backward compatibility with pre-CF-02 runs.
+    networkEvidenceIndexPath?: string;
   },
 ): Promise<WriteReviewInputResult> {
   const templates = await listTemplateFiles(args.templateDir);
@@ -127,12 +133,14 @@ export async function writeReviewInput(
   // lives) are never inlined in full; only grouped counts + capped samples per ruleId, plus the
   // path to the full inventory above.
   const reviewInput: ReviewInputDocument = {
-    schemaVersion: '1.1',
+    schemaVersion: '1.2',
     runId: args.runId,
     entryUrl: args.entryUrl,
     geo: args.geo,
     artifactBuilderMode: 'llm_post_run_only',
     templateFiles: templates,
+    // CF-03: on-disk reference only — the index/body files themselves are never inlined here.
+    networkEvidenceIndexPath: args.networkEvidenceIndexPath,
     visitedPages: args.visited,
     urlCounts: {
       discovered: args.decisions.length,
@@ -163,6 +171,7 @@ export async function writeReviewInput(
       interactivity: 'Report detected interactive candidates as candidates only. No interaction effect may be claimed because this run performs no element interactions.',
       urlSections: 'Show discovered/accepted/rejected/TBD/visited/failed URL counts separately. rejectedByRule/tbdByRule and rejectedSamples/tbdSamples are grouped/bounded summaries of the rejected and TBD sets, not the complete sets.',
       fullInventory: 'The complete, unbounded, full-provenance rejected/TBD/accepted decision set is at fullUrlInventoryPath (url-inventory.json), on disk beside this file. Read it only if you need evidence beyond the grouped counts/samples above.',
+      networkEvidence: 'Factual evidence order: (1) saved page corpus/HTML, (2) interaction/passive trace evidence, (3) same-origin captured network evidence associated with that visited page. When networkEvidenceIndexPath (network-evidence.jsonl) is present, a JSON-template field may cite a captured network evidence record/body path when the value is absent from the rendered DOM but present in a browser-observed response for that same visited page. A captured network response never proves that an unvisited document URL was visited, and never substitutes for saved corpus/HTML or trace evidence when both exist. Cite it as: visited page URL, request URL, and the network evidence body/index reference.',
     },
   };
   await writeJsonAtomic(filePath, reviewInput);

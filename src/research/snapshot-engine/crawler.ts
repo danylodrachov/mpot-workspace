@@ -33,6 +33,7 @@ import type {
 } from './types.ts';
 import { appendJsonLine, ensureDir, makeRunId, slugify, stablePageBasename, writeJsonAtomic, writeTextAtomic } from './io.ts';
 import { writeReviewInput } from './review-input.ts';
+import { validateNetworkEvidenceIndex } from './post-run-review.ts';
 import { renderReviewHtml } from './review-renderer.ts';
 import { finalizeDebugArtifacts } from './debug-artifacts.ts';
 import { buildPageCorpus } from './page-content-pruner.ts';
@@ -213,8 +214,14 @@ export async function crawlSite(options: CrawlOptions): Promise<DiscoveryRunMani
   const corpusDir = path.join(runDir, 'corpus');
   const jsonDir = path.join(runDir, 'json');
   const reviewHtmlPath = path.join(runDir, 'review.html');
+  // CF-02: run-scoped network evidence sink — bounded same-origin xhr/fetch response bodies
+  // observed while visiting accepted document pages, persisted alongside (not instead of) the
+  // existing URL-token discovery. Never a new navigation target.
+  const networkEvidenceDir = path.join(runDir, 'network');
+  const networkEvidenceIndexPath = path.join(runDir, 'network-evidence.jsonl');
   await ensureDir(corpusDir);
   await ensureDir(jsonDir);
+  await ensureDir(networkEvidenceDir);
   // CD-N01: pages.jsonl/interactions.jsonl are part of the retained 7-item contract and must
   // exist (possibly empty) as soon as the run folder is created — not only once the first page
   // visit/interaction-candidate happens to append a line, so a run with zero accepted URLs (or
@@ -652,7 +659,14 @@ export async function crawlSite(options: CrawlOptions): Promise<DiscoveryRunMani
     currentVisitUrl = target.canonicalUrl;
     const requestedUrl = target.visitUrl;
 
-    const network = new PassiveNetworkObserver(options.page, postVisitSink, allowedHostname, budgets.networkObserverFlushTimeoutMs);
+    const network = new PassiveNetworkObserver(
+      options.page,
+      postVisitSink,
+      allowedHostname,
+      budgets.networkObserverFlushTimeoutMs,
+      budgets.responseBodyScanTimeoutMs,
+      { evidenceDir: networkEvidenceDir, evidenceIndexPath: networkEvidenceIndexPath },
+    );
     network.start();
     pageIndex += 1;
     logEvent('page_attempt', { requestedUrl, canonicalUrl: target.canonicalUrl, pageIndex });
@@ -991,6 +1005,12 @@ export async function crawlSite(options: CrawlOptions): Promise<DiscoveryRunMani
   // Review/future-run material only: URLs observed while a Stage-4 page was visited never
   // fed back into this run's accepted queue (see the Phase 5 loop above). Debug-only.
   await writeJsonAtomic(postVisitObservationsPath, postVisitObservations);
+  // CF-03: validate CF-02's network-evidence.jsonl (when present) before it is handed to the
+  // reviewer — every 'captured' record must point at a body file that actually exists on disk.
+  // Absent entirely (no eligible network traffic, or a pre-CF-02 run) is a backward-compatible
+  // no-op. A missing body throws and fails the whole run rather than handing the reviewer a
+  // dangling reference.
+  const networkEvidenceGate = await validateNetworkEvidenceIndex(networkEvidenceIndexPath);
   // CD-N01: url-inventory.json (the retained, consolidated accepted/rejected/tbd decision
   // ledger with full provenance) is written to the run folder root; review-input.json (the
   // bounded LLM-reviewer control payload derived from it) stays debug-only.
@@ -1002,6 +1022,9 @@ export async function crawlSite(options: CrawlOptions): Promise<DiscoveryRunMani
     visited,
     decisions,
     urlInventoryPath,
+    // CF-03: only referenced when the index actually exists for this run — the index/bodies
+    // themselves are never inlined into review-input.json.
+    networkEvidenceIndexPath: networkEvidenceGate.present ? networkEvidenceIndexPath : undefined,
   });
 
   // CD-N06: exactly one LLM invocation for the whole run, over the deterministic evidence

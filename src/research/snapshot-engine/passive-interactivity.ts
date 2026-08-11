@@ -89,7 +89,62 @@ async function collectFrameElements(frame: Frame): Promise<{
       const identity = `${el.id} ${typeof el.className === 'string' ? el.className : ''}`;
       if (getComputedStyle(el).cursor === 'pointer' || heuristicClass.test(identity)) candidateSet.add(el);
     }
-    const elements = [...candidateSet].slice(0, maxElements);
+
+    // CF-04: a candidate discovered from a descendant with pointer/action semantics (e.g. an
+    // <img> inside a clickable payment-method card) is canonicalized to its nearest actionable
+    // ancestor when one exists, so the trace reports the real control (button/link/role/stable-id
+    // element) instead of a decorative/label child. The descendant's own accessible label is kept
+    // as evidence on the canonical candidate (used as a name fallback below) rather than dropped
+    // or surfaced as a second, noisy "clickable image" candidate. Elements that already carry
+    // their own actionable identity (native interactive tag, explicit interactive ARIA role, or a
+    // stable id/data-testid) are never canonicalized away — this is what keeps the Deposit/
+    // Withdrawal `[data-testid="depositList"/"withdrawList"]` buttons visible as their own
+    // separate passive candidates even though they may also contain label children.
+    const NATIVE_INTERACTIVE_TAGS = new Set(['button', 'a', 'select', 'summary', 'option', 'textarea', 'input']);
+    const INTERACTIVE_ROLES = new Set([
+      'button', 'link', 'tab', 'menuitem', 'checkbox', 'radio', 'switch',
+      'combobox', 'listbox', 'option', 'textbox', 'searchbox', 'slider', 'spinbutton',
+    ]);
+    const hasOwnActionableIdentity = (candidate: Element): boolean => {
+      const tag = candidate.tagName.toLowerCase();
+      if (NATIVE_INTERACTIVE_TAGS.has(tag)) return true;
+      const role = candidate.getAttribute('role');
+      if (role && INTERACTIVE_ROLES.has(role)) return true;
+      if ((candidate as HTMLElement).id) return true;
+      if (candidate.getAttribute('data-testid')) return true;
+      return false;
+    };
+    const findActionableAncestor = (candidate: Element): Element | null => {
+      let current: Element | null = candidate.parentElement;
+      let depth = 0;
+      while (current && current !== document.body && depth < 8) {
+        if (hasOwnActionableIdentity(current)) return current;
+        current = current.parentElement;
+        depth += 1;
+      }
+      return null;
+    };
+    const childLabelsByTarget = new Map<Element, string[]>();
+    const canonicalTarget = new Map<Element, Element>();
+    for (const el of candidateSet) {
+      if (hasOwnActionableIdentity(el)) {
+        canonicalTarget.set(el, el);
+        continue;
+      }
+      const ancestor = findActionableAncestor(el);
+      if (!ancestor) {
+        canonicalTarget.set(el, el);
+        continue;
+      }
+      canonicalTarget.set(el, ancestor);
+      const ownLabel = clean(el.getAttribute('aria-label') ?? el.getAttribute('alt') ?? el.getAttribute('title') ?? el.textContent);
+      if (ownLabel) {
+        const existing = childLabelsByTarget.get(ancestor) ?? [];
+        if (!existing.includes(ownLabel)) existing.push(ownLabel);
+        childLabelsByTarget.set(ancestor, existing);
+      }
+    }
+    const elements = [...new Set(canonicalTarget.values())].slice(0, maxElements);
     const interactive = elements.map((el) => {
       const html = el as HTMLElement;
       const role = el.getAttribute('role') ?? undefined;
@@ -97,13 +152,15 @@ async function collectFrameElements(frame: Frame): Promise<{
       const type = el.getAttribute('type') ?? undefined;
       const href = el instanceof HTMLAnchorElement ? el.href : el.getAttribute('href') ?? undefined;
       const action = el instanceof HTMLFormElement ? el.action : el.getAttribute('action') ?? undefined;
-      const name = clean(
+      const ownName = clean(
         el.getAttribute('aria-label') ??
         el.getAttribute('title') ??
         el.getAttribute('alt') ??
         (el instanceof HTMLInputElement ? el.placeholder : undefined) ??
         el.textContent,
       );
+      const childLabels = childLabelsByTarget.get(el);
+      const name = ownName ?? (childLabels && childLabels.length > 0 ? childLabels.join(' / ') : undefined);
       const eventAttributeHints = ['onclick', 'onchange', 'oninput', 'onsubmit', 'onkeydown', 'onkeyup']
         .filter((attr) => el.hasAttribute(attr));
       const hints = new Set<string>();

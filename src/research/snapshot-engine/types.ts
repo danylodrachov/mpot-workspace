@@ -15,6 +15,28 @@ export type SourceFamily =
 
 export type UrlDecisionKind = 'accepted' | 'rejected' | 'tbd';
 
+// CF-02: one index record per eligible network response observed by PassiveNetworkObserver.
+// Appended to <runDir>/network-evidence.jsonl; raw bodies live under <runDir>/network/. This is
+// evidence attached to the visited document page that produced the traffic — it never causes an
+// extra navigation and never changes the deterministic URL lifecycle (see url-rules.ts).
+export type NetworkEvidenceOutcome = 'captured' | 'skipped' | 'timeout' | 'error';
+
+export interface NetworkEvidenceRecord {
+  schemaVersion: '1.0';
+  observedOnPageUrl: string;
+  requestUrl: string;
+  requestMethod: string;
+  resourceType: string;
+  status: number;
+  contentType?: string;
+  capturedAt: string;
+  bodyPath?: string;
+  bodySha256?: string;
+  bodyBytes?: number;
+  outcome: NetworkEvidenceOutcome;
+  reason?: string;
+}
+
 export interface CandidateProvenance {
   sourceFamily: SourceFamily;
   discoveredOn: string;
@@ -545,13 +567,20 @@ export interface ReviewInputAcceptedTarget {
 }
 
 export interface ReviewInputDocument {
-  schemaVersion: '1.1';
+  // CF-03: bumped 1.1 -> 1.2 for the addition of networkEvidenceIndexPath below.
+  schemaVersion: '1.2';
   runId: string;
   entryUrl: string;
   geo?: string;
   artifactBuilderMode: 'llm_post_run_only';
   templateFiles: string[];
   visitedPages: VisitedPageRecord[];
+  // CF-03: path to <runDir>/network-evidence.jsonl (CF-02's index of bounded same-origin
+  // xhr/fetch response bodies observed while visiting accepted document pages), when that file
+  // exists for this run. Never inlined here — the reviewer reads the index/body files from disk
+  // by path, exactly like fullUrlInventoryPath below. Absent (undefined) when CF-02 produced no
+  // eligible network traffic this run (backward-compatible with pre-CF-02 runs).
+  networkEvidenceIndexPath?: string;
   urlCounts: {
     discovered: number;
     accepted: number;

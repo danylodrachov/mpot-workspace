@@ -191,6 +191,88 @@ test('buildPageCorpus: form select option text is preserved', () => {
   assert.ok(corpus.includes('GBP'));
 });
 
+// CF-01: image accessible labels (alt/aria-label/title) carry semantic meaning (e.g. a payment
+// method logo) and must survive pruning as plain text, even though the <img> itself is dropped.
+test('buildPageCorpus: an image alt inside a button survives pruning as text', () => {
+  const html = `<html><body><button><img src="/visa.png" alt="Visa" /></button></body></html>`;
+
+  const corpus = buildPageCorpus({
+    requestedUrl: 'https://example.test/payments',
+    finalUrl: 'https://example.test/payments',
+    html,
+  });
+
+  assert.ok(corpus.includes('Visa'));
+  assert.ok(!corpus.includes('visa.png'));
+});
+
+test('buildPageCorpus: an image aria-label survives pruning as text', () => {
+  const html = `<html><body><img src="/mc.png" aria-label="Mastercard" /></body></html>`;
+
+  const corpus = buildPageCorpus({
+    requestedUrl: 'https://example.test/payments',
+    finalUrl: 'https://example.test/payments',
+    html,
+  });
+
+  assert.ok(corpus.includes('Mastercard'));
+  assert.ok(!corpus.includes('mc.png'));
+});
+
+test('buildPageCorpus: a decorative image with empty alt contributes no text', () => {
+  const html = `<html><body><p>Before.</p><img src="/spacer.png" alt="" /><p>After.</p></body></html>`;
+
+  const corpus = buildPageCorpus({
+    requestedUrl: 'https://example.test/payments',
+    finalUrl: 'https://example.test/payments',
+    html,
+  });
+
+  assert.ok(corpus.includes('Before.'));
+  assert.ok(corpus.includes('After.'));
+  assert.ok(!corpus.includes('spacer.png'));
+});
+
+test('buildPageCorpus: a header/footer logo image label does not survive chrome pruning', () => {
+  const html = `<html><body>
+    <header><img src="/logo.png" alt="CasinoBrand Logo" /></header>
+    <main><p>Main content.</p></main>
+    <footer><img src="/footer-logo.png" alt="CasinoBrand Footer Logo" /></footer>
+  </body></html>`;
+
+  const corpus = buildPageCorpus({
+    requestedUrl: 'https://example.test/home',
+    finalUrl: 'https://example.test/home',
+    html,
+  });
+
+  assert.ok(corpus.includes('Main content.'));
+  assert.ok(!corpus.includes('CasinoBrand Logo'));
+  assert.ok(!corpus.includes('CasinoBrand Footer Logo'));
+});
+
+test('buildPageCorpus: every distinct image-only payment method label survives in a list', () => {
+  const html = `<html><body>
+    <ul>
+      <li><img src="/visa.png" alt="Visa" /></li>
+      <li><img src="/mastercard.png" alt="Mastercard" /></li>
+      <li><img src="/skrill.png" aria-label="Skrill" /></li>
+      <li><img src="/neteller.png" title="Neteller" /></li>
+    </ul>
+  </body></html>`;
+
+  const corpus = buildPageCorpus({
+    requestedUrl: 'https://example.test/payments',
+    finalUrl: 'https://example.test/payments',
+    html,
+  });
+
+  assert.ok(corpus.includes('Visa'));
+  assert.ok(corpus.includes('Mastercard'));
+  assert.ok(corpus.includes('Skrill'));
+  assert.ok(corpus.includes('Neteller'));
+});
+
 test('buildPageCorpus: includes requested/final URL and title metadata', () => {
   const corpus = buildPageCorpus({
     requestedUrl: 'https://example.test/a',
