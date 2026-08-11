@@ -233,10 +233,12 @@ test('FIX-04: continuous background traffic (no networkidle requirement) does no
   assert.ok(record.htmlPath && fs.existsSync(record.htmlPath));
 });
 
-test('FIX-04: a DOM that never stabilizes produces an explicit page_settle_timeout error, never a false-positive visited success', async () => {
+test('FIX-09: a DOM that never stabilizes is still recorded visited (best-effort capture), with the settle timeout as a non-fatal diagnostic', async () => {
   const pagesDir = makeTmpPagesDir();
   const page = makeScriptedSettlePage({
     // Content keeps changing on every single poll — never two consecutive identical samples.
+    // Simulates a real-world SPA that keeps mutating its DOM (ongoing WebSocket/analytics
+    // traffic, animations) well past a short settle window.
     htmlAtTick: (tick) => `<html><body>tick-${tick}</body></html>`,
   });
 
@@ -252,14 +254,17 @@ test('FIX-04: a DOM that never stabilizes produces an explicit page_settle_timeo
     networkObserver: makeFakeNetworkObserver(),
   });
 
-  assert.equal(record.status, 'failed');
-  assert.equal(record.failureReason, 'page_settle_timeout');
-  assert.equal(record.htmlPath, undefined);
-  assert.equal(record.tracePath, undefined);
-  assert.ok(record.error?.message.includes('did not settle'));
-  // Navigation result itself (final URL) is still preserved even though the snapshot was refused.
+  // Navigation succeeded (HTTP 200), so the visit is 'visited' even though the settle-poll loop
+  // never converged — only the settleStatus/diagnostic distinguishes this from a clean settle.
+  assert.equal(record.status, 'visited');
+  assert.equal(record.failureReason, undefined);
+  assert.equal(record.settleStatus, 'timeout');
+  assert.ok(record.htmlPath && fs.existsSync(record.htmlPath));
+  assert.ok(record.tracePath && fs.existsSync(record.tracePath));
   assert.equal(record.finalUrl, 'https://example.test/page');
-  assert.deepEqual(fs.readdirSync(pagesDir), []);
+
+  const trace = JSON.parse(fs.readFileSync(record.tracePath!, 'utf8'));
+  assert.ok(trace.notes.some((note: string) => note.includes('page_settle_timeout')));
 });
 
 // --- FIX-04 named regression: run 2026-08-10T14-58-23-014Z-360a9ab9 ---
@@ -300,7 +305,7 @@ test('regression 2026-08-10T14-58-23-014Z-360a9ab9: final URL updates immediatel
   assert.doesNotMatch(savedHtml, /Homepage/);
 });
 
-test('regression 2026-08-10T14-58-23-014Z-360a9ab9: final URL is /en/rules but a visible loading indicator never clears — refused as an explicit settle error, never reported visited', async () => {
+test('regression 2026-08-10T14-58-23-014Z-360a9ab9: final URL is /en/rules but a visible loading indicator never clears — captured as a best-effort visited snapshot with settleStatus: timeout, never reported as a clean settle', async () => {
   const pagesDir = makeTmpPagesDir();
   const page = makeScriptedSettlePage({
     urlAtTick: () => 'https://example.test/en/rules',
@@ -324,12 +329,12 @@ test('regression 2026-08-10T14-58-23-014Z-360a9ab9: final URL is /en/rules but a
     networkObserver: makeFakeNetworkObserver(),
   });
 
-  // The homepage HTML is never reachable as a 'visited' snapshot for the /en/rules route: it is
-  // never written to disk, and the record is refused as an explicit page_settle_timeout error
-  // instead of a clean visited success — the stale-DOM-reported-as-clean-visit failure mode is
-  // structurally impossible.
-  assert.equal(record.status, 'failed');
-  assert.equal(record.failureReason, 'page_settle_timeout');
-  assert.equal(record.htmlPath, undefined);
+  // Navigation to /en/rules succeeded, so the visit is still 'visited' — but settleStatus:
+  // 'timeout' means a consumer must not treat the saved (still possibly-stale) HTML as a
+  // converged, fully-trustworthy snapshot the way a 'settled' capture would be.
+  assert.equal(record.status, 'visited');
+  assert.equal(record.failureReason, undefined);
+  assert.equal(record.settleStatus, 'timeout');
+  assert.ok(record.htmlPath && fs.existsSync(record.htmlPath));
   assert.equal(record.finalUrl, 'https://example.test/en/rules');
 });

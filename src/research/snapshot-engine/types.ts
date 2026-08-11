@@ -138,16 +138,18 @@ export interface PagePassiveTrace {
 // covers an accepted URL that the run-level watchdog never attempted because the overall run
 // deadline was already reached — a distinct terminal state from any operation that actually ran
 // and failed, so downstream consumers can tell "we tried and it broke" from "we ran out of time".
-// FIX-04: 'page_settle_timeout' is a narrower, more specific terminal state than
-// 'page_capture_timeout' — it means navigation itself completed (finalUrl/httpStatus are known
-// and preserved on the record) but the bounded deterministic settle routine (final URL +
-// document readyState + rendered-DOM content-hash stability + absence of a visible loading
-// indicator) never converged before its own settleMs budget ran out. Distinct from
-// 'page_capture_timeout' so downstream consumers (post-run review, FIX-05) can tell "navigation
-// succeeded but the DOM was never trustworthy" apart from "the whole capture step hung". A
-// record with this failureReason always has status 'failed' and never has htmlPath/tracePath/
-// htmlSha256 set — there is no code path where a page_settle_timeout record is also reported as
-// a clean 'visited' snapshot.
+// FIX-09: 'page_settle_timeout' no longer denotes a *failed* visit. Real-world SPAs (ongoing
+// WebSocket/analytics traffic, animations) can keep mutating their DOM well past any bounded
+// settle window even though navigation itself succeeded cleanly. A page whose settle-poll loop
+// never converged is still captured and reported as status: 'visited' — the bounded settle
+// routine (final URL + document readyState + rendered-DOM content-hash stability + absence of a
+// visible loading indicator) is now best-effort, not a mandatory success gate. This value is
+// retained in the union only for historical/on-disk compatibility with runs produced before
+// FIX-09 (where it did appear on status:'failed' records); no current code path sets it as a
+// failureReason. Whether a *current* capture's settle poll converged is now reported via the
+// separate `settleStatus` field on VisitedPageRecord/PageSnapshotRecord instead, which is always
+// present and distinguishes a clean settle from a best-effort/timeout capture even though both
+// are status: 'visited'.
 export type PageFailureReason =
   | 'http_client_error'
   | 'http_server_error'
@@ -156,6 +158,14 @@ export type PageFailureReason =
   | 'page_capture_timeout'
   | 'page_settle_timeout'
   | 'run_deadline_reached';
+
+// FIX-09: whether the bounded, best-effort settle-poll loop (see waitForPageSettle in
+// page-capture.ts) actually converged before its budget ran out. 'settled' means the DOM was
+// observed stable/terminal/loading-indicator-free for the required consecutive samples;
+// 'timeout' means the budget was exhausted first and the HTML/trace were captured from the last
+// sample taken anyway (best-effort) — a consumer that cares about snapshot trustworthiness
+// should treat 'timeout' captures as lower-confidence, never as indistinguishable from 'settled'.
+export type SettleStatus = 'settled' | 'timeout';
 
 export interface VisitedPageRecord {
   requestedUrl: string;
@@ -173,6 +183,10 @@ export interface VisitedPageRecord {
   status: 'visited' | 'failed';
   httpStatus?: number;
   failureReason?: PageFailureReason;
+  // FIX-09: only meaningful when status === 'visited'. Absent on 'failed' records (a failed
+  // visit never reached the settle-poll step, or reached it but is still reported failed for an
+  // unrelated reason such as http_client_error captured before settling was attempted).
+  settleStatus?: SettleStatus;
   title?: string;
   htmlPath?: string;
   tracePath?: string;
@@ -218,6 +232,10 @@ export interface PageSnapshotRecord {
   requestedUrl: string;
   finalUrl: string;
   httpStatus?: number;
+  // FIX-09: mirrors VisitedPageRecord.settleStatus for this same page so a page-snapshots.jsonl
+  // row can be told apart as a best-effort/unsettled capture without cross-referencing
+  // page-visits.jsonl.
+  settleStatus?: SettleStatus;
   title?: string;
   htmlPath: string;
   tracePath: string;

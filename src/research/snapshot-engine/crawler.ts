@@ -520,7 +520,14 @@ export async function crawlSite(options: CrawlOptions): Promise<DiscoveryRunMani
           requestedUrl,
           pageIndex,
           pagesDir,
-          settleMs: options.settleMs ?? 1_500,
+          // FIX-09: bumped from 1_500ms — real-world SPAs (ongoing WebSocket/analytics traffic,
+          // animations) routinely keep mutating the DOM well past a short settle window even
+          // though navigation itself already succeeded. A settle timeout is no longer fatal to
+          // the page visit (see page-capture.ts), so this is purely a best-effort observation
+          // budget, not a pass/fail gate — widening it just means more real pages settle
+          // cleanly (settleStatus: 'settled') instead of falling through to a best-effort
+          // ('timeout') capture.
+          settleMs: options.settleMs ?? 6_000,
           navigationTimeoutMs: options.navigationTimeoutMs ?? 30_000,
           discoveredBy,
           networkObserver: network,
@@ -599,6 +606,7 @@ export async function crawlSite(options: CrawlOptions): Promise<DiscoveryRunMani
         requestedUrl: record.requestedUrl,
         finalUrl: record.finalUrl ?? record.requestedUrl,
         httpStatus: record.httpStatus,
+        settleStatus: record.settleStatus,
         title: record.title,
         htmlPath: record.htmlPath,
         tracePath: record.tracePath,

@@ -1,6 +1,6 @@
 import type { Page } from 'playwright';
 import { collectPassiveInteractivity, hasVisibleLoadingIndicator } from './passive-interactivity.ts';
-import type { AutomaticDialogTrace, PagePassiveTrace, VisitedPageRecord } from './types.ts';
+import type { AutomaticDialogTrace, PagePassiveTrace, SettleStatus, VisitedPageRecord } from './types.ts';
 import { sha256, stablePageBasename, writeJsonAtomic, writeTextAtomic } from './io.ts';
 import path from 'node:path';
 import type { PassiveNetworkObserver } from './url-discovery.ts';
@@ -191,33 +191,13 @@ export async function capturePage(options: PageCaptureOptions): Promise<VisitedP
     const finalUrl = settleResult.sample.url || options.page.url();
     const httpStatus = httpStatusFromResponse;
 
-    if (!settleResult.settled) {
-      // Navigation itself completed (finalUrl/httpStatus are preserved), but the page never
-      // reached a stable, terminal-ready, loading-indicator-free state within the bounded
-      // settle budget. Never silently mark a transitional/possibly-stale DOM as a valid
-      // 'visited' snapshot — record an explicit settle-timeout error instead. No HTML/trace is
-      // written for this outcome, matching every other 'failed' terminal state.
-      const completed = new Date();
-      return {
-        requestedUrl: options.requestedUrl,
-        finalUrl,
-        status: 'failed',
-        httpStatus,
-        failureReason: 'page_settle_timeout',
-        discoveredBy: options.discoveredBy,
-        startedAt: started.toISOString(),
-        completedAt: completed.toISOString(),
-        durationMs: completed.getTime() - started.getTime(),
-        error: {
-          name: 'PageSettleTimeoutError',
-          message:
-            `Page did not settle within ${options.settleMs}ms (url=${settleResult.sample.url}, ` +
-            `readyState=${settleResult.sample.readyState}, ` +
-            `loadingIndicatorPresent=${settleResult.sample.loadingIndicatorPresent}, ` +
-            `attempts=${settleResult.attempts}, elapsedMs=${settleResult.elapsedMs})`,
-        },
-      };
-    }
+    // FIX-09: navigation already succeeded (httpStatusFromResponse was checked above), so a
+    // settle-poll timeout is no longer treated as a page-visit failure. The bounded settle
+    // routine is best-effort: whatever DOM was observed at the last sample is captured and
+    // saved either way, and `settleStatus` tells a downstream consumer whether the capture is
+    // a clean, converged snapshot ('settled') or a best-effort one taken after the settle
+    // budget ran out ('timeout') — never silently indistinguishable from each other.
+    const settleStatus: SettleStatus = settleResult.settled ? 'settled' : 'timeout';
 
     const title = await options.page.title().catch(() => undefined);
     const html = await options.page.content();
@@ -239,6 +219,15 @@ export async function capturePage(options: PageCaptureOptions): Promise<VisitedP
       runtimeSignals: passive.runtimeSignals,
       notes: [
         'Passive-only profile: no element click, hover, keyboard activation, form fill, selection, pagination, load-more, or controlled scroll was executed.',
+        ...(settleStatus === 'timeout'
+          ? [
+              `page_settle_timeout: page did not settle within ${options.settleMs}ms (url=${settleResult.sample.url}, ` +
+                `readyState=${settleResult.sample.readyState}, ` +
+                `loadingIndicatorPresent=${settleResult.sample.loadingIndicatorPresent}, ` +
+                `attempts=${settleResult.attempts}, elapsedMs=${settleResult.elapsedMs}); HTML/trace below are a ` +
+                'best-effort capture of the last observed sample, not a converged snapshot.',
+            ]
+          : []),
         ...passive.notes,
       ],
     };
@@ -252,6 +241,7 @@ export async function capturePage(options: PageCaptureOptions): Promise<VisitedP
       finalUrl,
       status: 'visited',
       httpStatus,
+      settleStatus,
       title,
       htmlPath,
       tracePath,
