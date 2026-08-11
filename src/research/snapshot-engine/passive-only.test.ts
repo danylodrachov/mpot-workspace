@@ -6,13 +6,23 @@ import path from 'node:path';
 // The snapshot crawl is passive by contract: it may navigate and read, but it must
 // never activate a page element. A regression here would make the saved trace claim
 // post-action behaviour the run never observed.
+//
+// CD-N04 sanctioned exception: interaction-delta-profiler.ts is the one module allowed to
+// perform a real, bounded, deterministic interaction (see its own module docstring) — a trace
+// candidate alone still never becomes extracted evidence there; only a measured before/after
+// delta can produce a 'revealed_evidence' outcome. It is excluded from the blanket scan below and
+// instead covered by its own safety-contract assertions further down this file.
+const INTERACTION_EXECUTION_MODULE = 'interaction-delta-profiler.ts';
+
 const engineDir = import.meta.dirname;
 const sources = fs
   .readdirSync(engineDir)
   .filter((file) => file.endsWith('.ts') && !file.endsWith('.test.ts'))
   .map((file) => ({ file, text: fs.readFileSync(path.join(engineDir, file), 'utf-8') }));
 
-test('no snapshot-engine module performs a page-element interaction', () => {
+const passiveOnlySources = sources.filter((source) => source.file !== INTERACTION_EXECUTION_MODULE);
+
+test('no snapshot-engine module performs a page-element interaction (except the sanctioned CD-N04 interaction-delta-profiler)', () => {
   const forbidden = [
     /\.click\s*\(/,
     /\.dblclick\s*\(/,
@@ -31,7 +41,7 @@ test('no snapshot-engine module performs a page-element interaction', () => {
     /mouse\.\w+\s*\(/,
     /keyboard\.\w+\s*\(/,
   ];
-  for (const { file, text } of sources) {
+  for (const { file, text } of passiveOnlySources) {
     for (const pattern of forbidden) {
       assert.ok(!pattern.test(text), `${file} must not call ${pattern.source} — the crawl is passive-only`);
     }
@@ -49,6 +59,34 @@ test('automatic dialogs are only dismissed, never accepted', () => {
 test('the crawler never closes the attached authenticated browser', () => {
   for (const { file, text } of sources) {
     assert.ok(!/browser\.close\s*\(/.test(text), `${file} must not close the user's attached Chrome`);
+  }
+});
+
+// CD-N04: the sanctioned interaction module is still held to its own hard safety contract, even
+// though it is allowed to call .click(). These checks are text-level guards against the specific
+// regressions this ticket calls out (blindly clicking custom_pointer_control noise, executing
+// transaction/account/game-launch actions, hostname-specific logic).
+test('CD-N04: interaction-delta-profiler.ts never treats a bare custom_pointer_control hint as an executable action class', () => {
+  const text = sources.find((source) => source.file === INTERACTION_EXECUTION_MODULE)?.text ?? '';
+  assert.ok(text.length > 0, `${INTERACTION_EXECUTION_MODULE} must exist`);
+  assert.ok(
+    !text.includes("hints.has('custom_pointer_control')"),
+    'custom_pointer_control must never be directly promoted to an executable action class',
+  );
+});
+
+test('CD-N04: interaction-delta-profiler.ts excludes cookie/account/game-launch/transaction candidates from automatic execution', () => {
+  const text = sources.find((source) => source.file === INTERACTION_EXECUTION_MODULE)?.text ?? '';
+  for (const marker of ['COOKIE_PATTERN', 'ACCOUNT_PATTERN', 'GAME_LAUNCH_PATTERN', 'TRANSACTION_PATTERN']) {
+    assert.match(text, new RegExp(marker), `${INTERACTION_EXECUTION_MODULE} must define ${marker} exclusion evidence`);
+  }
+});
+
+test('CD-N04: no detector or action recipe in interaction-delta-profiler.ts depends on a casino hostname or framework-specific component name', () => {
+  const text = sources.find((source) => source.file === INTERACTION_EXECUTION_MODULE)?.text ?? '';
+  const forbiddenNameFragments = [/react/i, /angular/i, /\bvue\b/i, /bootstrap/i, /\.casino\b/i];
+  for (const pattern of forbiddenNameFragments) {
+    assert.ok(!pattern.test(text), `${INTERACTION_EXECUTION_MODULE} must not encode framework-specific detection for ${pattern.source}`);
   }
 });
 

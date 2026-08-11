@@ -34,7 +34,15 @@
     "/sport/football",
     "/sport/basketball",
     "/en/sport/football",
-    "/fr/sport/tennis"
+    "/fr/sport/tennis",
+    "/sport/ice-hockey",
+    "/casino/live-casino/popular",
+    "/casino/live-casino/blackjack",
+    "/casino/live-casino/roulette",
+    "/casino/live-casino/baccarat",
+    "/casino/live-casino/game-shows",
+    "/casino/live-casino/poker",
+    "/en/casino/live-casino/blackjack"
   ],
   "normalized": {
     "/football/live": "/football",
@@ -49,7 +57,8 @@
     "/sport/football/england/premier-league": "/sport/football",
     "/sport/basketball/north-america/nba": "/sport/basketball",
     "/en/sport/football/england/premier-league": "/sport/football",
-    "/fr/sport/basketball/north-america/nba": "/sport/basketball"
+    "/fr/sport/basketball/north-america/nba": "/sport/basketball",
+    "/sport/football/uefa-champions-league": "/sport/football"
   },
   "rejected": [
     "/",
@@ -84,7 +93,17 @@
     "/en/casino/lobby",
     "/en/privacy-policy",
     "/en/404",
-    "/en-GB/404"
+    "/en-GB/404",
+    "/sport/uefa-champions-league",
+    "/sport/uefa-europa-league",
+    "/sport/uefa-conference-league",
+    "/en/sport/uefa-champions-league",
+    "/casino/live-casino/game/lightning-roulette",
+    "/casino/live-casino/game/some-slug",
+    "/casino/live-casino/provider-game/some-slug",
+    "/casino/live-casino/demo-game/some-slug",
+    "/casino/live-casino/demo-game",
+    "/casino/live-casino/game"
   ],
   "tbd": [
     "/api/casino",

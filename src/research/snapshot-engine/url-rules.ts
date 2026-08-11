@@ -22,6 +22,28 @@ const DROP_PATTERNS: Array<{ id: string; re: RegExp; reason: string }> = [
   { id: 'URLR_DROP_NESTED_CASINO_CATEGORY', re: /^\/casino\/(?:slots|live-casino|virtual-sports)\/.+/i, reason: 'Nested casino category route; keep only canonical category landing.' },
 ];
 
+// Generic route-segment vocabulary for individual game-launch targets (not a rail/sub-category
+// label). Used to keep the live-casino sub-category rail generic: any single nested segment
+// under /casino/live-casino/<segment> is treated as a rail entry (Popular, Blackjack, Roulette,
+// Baccarat, Game Shows, Poker, ...) UNLESS it names a game-launch mechanism itself, in which case
+// it is left to fall through to URLR_DROP_NESTED_CASINO_CATEGORY (and deeper-nested paths such as
+// /casino/live-casino/game/<slug> or /casino/live-casino/provider-game/<slug> always fall through
+// regardless of this list, since they are not a single segment).
+const LIVE_CASINO_GAME_ROUTE_SEGMENTS = new Set([
+  'game', 'games', 'play', 'launch', 'demo', 'demo-game', 'provider', 'provider-game', 'table',
+]);
+
+// Generic closed vocabulary of real-world sport names. Used to keep /sport/<category> root
+// acceptance generic: a category segment must actually name a sport (not a competition, league,
+// or tournament slug such as "uefa-champions-league") to canonicalize as a category root. This is
+// not hostname-specific — it is the same closed set of sport names for every casino site.
+const SPORT_CATEGORY_ROOTS = new Set([
+  'football', 'basketball', 'tennis', 'ice-hockey', 'baseball', 'american-football', 'boxing',
+  'cricket', 'esports', 'golf', 'handball', 'mma', 'rugby', 'snooker', 'table-tennis',
+  'volleyball', 'motorsport', 'darts', 'cycling', 'horse-racing', 'futsal', 'badminton',
+  'water-polo', 'rugby-league', 'rugby-union', 'formula-1', 'winter-sports',
+]);
+
 const TBD_PATTERNS: Array<{ id: string; re: RegExp; reason: string }> = [
   { id: 'URLR_TBD_API', re: /(?:^|\/)(?:api|graphql|rest)(?:\/|$)|\.(?:json|xml)(?:$|\?)/i, reason: 'API/JSON endpoint classification is TBD.' },
   { id: 'URLR_TBD_ASSET', re: /\.(?:js|mjs|css|map|png|jpe?g|gif|webp|svg|ico|woff2?|ttf|otf|eot|mp4|webm|mp3|wav|pdf|zip|gz|br)(?:$|\?)/i, reason: 'Asset/bundle URL classification is TBD.' },
@@ -86,10 +108,35 @@ function canonicalProductCategory(path: string, url: URL): { url: URL; ruleId: s
     return { url: out, ruleId: 'URLR_KEEP_SPORT_CATEGORY', reason: 'Canonical sports category landing.' };
   }
 
+  // /casino/live-casino/<segment> — the live-casino landing page's sub-category rail (Popular,
+  // Blackjack, Roulette, Baccarat, Game Shows, Poker, ...). Exactly one nested segment names a
+  // rail entry; anything deeper (e.g. /casino/live-casino/game/<slug>) is an individual game/table
+  // launch route and falls through to URLR_DROP_NESTED_CASINO_CATEGORY below. A single segment
+  // that itself names a game-launch mechanism (see LIVE_CASINO_GAME_ROUTE_SEGMENTS) is also left
+  // to fall through, so individual game pages are never mistaken for rail categories.
+  const liveCasinoRail = path.match(/^\/casino\/live-casino\/([^/]+)$/i);
+  if (liveCasinoRail) {
+    const segment = liveCasinoRail[1]!;
+    if (!LIVE_CASINO_GAME_ROUTE_SEGMENTS.has(segment.toLowerCase())) {
+      const out = new URL(url.href);
+      out.pathname = `/casino/live-casino/${segment}`;
+      out.search = '';
+      out.hash = '';
+      return {
+        url: out,
+        ruleId: 'URLR_KEEP_LIVE_CASINO_SUBCATEGORY',
+        reason: 'Live-casino landing page sub-category rail entry.',
+      };
+    }
+  }
+
   // /sport/<category>[/<nested...>] — a real casino site's sports category root, possibly
-  // followed by league/event navigation depth that must collapse to the category root.
+  // followed by league/event navigation depth that must collapse to the category root. Only a
+  // recognized sport name (SPORT_CATEGORY_ROOTS) canonicalizes here; competition/tournament/league
+  // slugs (e.g. /sport/uefa-champions-league) are not sport category roots and are left
+  // unclassified so they are never visited as if they were a category landing page.
   const sportMatch = path.match(/^\/sport\/([^/]+)(?:\/.*)?$/i);
-  if (sportMatch) {
+  if (sportMatch && SPORT_CATEGORY_ROOTS.has(sportMatch[1]!.toLowerCase())) {
     const category = sportMatch[1]!;
     const isRootOnly = path.toLowerCase() === `/sport/${category.toLowerCase()}`;
     const out = new URL(url.href);

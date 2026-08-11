@@ -159,6 +159,51 @@ test('FIX-02: individual game/event pages remain rejected regardless of locale',
   assert.equal(decide('/event/12345').decision, 'rejected');
 });
 
+test('CD-N03: live-casino sub-category rail is kept, individual live game/table launch routes are rejected', () => {
+  assert.equal(decide('/casino/live-casino/blackjack').decision, 'accepted');
+  assert.equal(decide('/casino/live-casino/blackjack').ruleId, 'URLR_KEEP_LIVE_CASINO_SUBCATEGORY');
+  assert.equal(decide('/casino/live-casino/roulette').decision, 'accepted');
+  assert.equal(decide('/casino/live-casino/baccarat').decision, 'accepted');
+  assert.equal(decide('/casino/live-casino/game-shows').decision, 'accepted');
+  assert.equal(decide('/casino/live-casino/poker').decision, 'accepted');
+  assert.equal(decide('/casino/live-casino/popular').decision, 'accepted');
+
+  // Individual game/table launch routes (the "More Games" links) are never enqueued.
+  assert.equal(decide('/casino/live-casino/game/lightning-roulette').decision, 'rejected');
+  assert.equal(decide('/casino/live-casino/game').decision, 'rejected');
+  assert.equal(decide('/casino/live-casino/provider-game/some-slug').decision, 'rejected');
+  assert.equal(decide('/casino/live-casino/demo-game/some-slug').decision, 'rejected');
+  assert.equal(decide('/casino/live-casino/demo-game').decision, 'rejected');
+});
+
+test('CD-N03: /sport/<category> roots only accept real sport names, not competitions/tournaments/leagues (generic — no hostname-specific rule)', () => {
+  assert.equal(decide('/sport/ice-hockey').decision, 'accepted');
+
+  // Regression fixtures from a real casino site (Westace) — the rule below is generic sport-name
+  // vocabulary, not a hostname-specific carve-out; any host hits the same classification.
+  assert.equal(decide('/sport/uefa-champions-league').decision, 'rejected');
+  assert.equal(decide('/sport/uefa-europa-league').decision, 'rejected');
+  assert.equal(decide('/sport/uefa-conference-league').decision, 'rejected');
+
+  const nestedFootball = decide('/sport/football/uefa-champions-league');
+  assert.equal(nestedFootball.decision, 'accepted');
+  assert.equal(nestedFootball.canonicalUrl, 'https://example.com/sport/football');
+
+  const westaceHost = 'ws43--westace.com';
+  const westaceDecide = (url: string) => decideUrl(url, `https://${westaceHost}/`, westaceHost, provenance);
+  assert.equal(westaceDecide('https://ws43--westace.com/sport/uefa-champions-league').decision, 'rejected');
+  assert.equal(westaceDecide('https://ws43--westace.com/sport/uefa-europa-league').decision, 'rejected');
+  assert.equal(westaceDecide('https://ws43--westace.com/sport/uefa-conference-league').decision, 'rejected');
+  const westaceFootball = westaceDecide('https://ws43--westace.com/sport/football/england/premier-league');
+  assert.equal(westaceFootball.decision, 'accepted');
+  assert.equal(westaceFootball.canonicalUrl, `https://${westaceHost}/sport/football`);
+  assert.equal(
+    westaceDecide('https://ws43--westace.com/casino/live-casino/game/lightning-roulette').decision,
+    'rejected',
+  );
+  assert.equal(westaceDecide('https://ws43--westace.com/casino/live-casino/blackjack').decision, 'accepted');
+});
+
 // Full URL Rules fixture sweep: every approved keep/drop/TBD/normalisation case
 // from docs/casino-discovery/URL-rules.md, so a rule edit cannot silently move a
 // route between visit classes.

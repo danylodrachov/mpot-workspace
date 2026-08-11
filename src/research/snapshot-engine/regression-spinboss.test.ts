@@ -170,9 +170,11 @@ test('FIX-09: local SpinBoss-shaped fixture — stuck response body + 404 + unma
     context,
     page,
     entryUrl,
+    casinoName: 'Spinboss',
     outputDir,
     settleMs: 0,
     navigationTimeoutMs: 1000,
+    debugArtifacts: true,
   });
 
   const elapsedMs = Date.now() - startedAt;
@@ -180,7 +182,8 @@ test('FIX-09: local SpinBoss-shaped fixture — stuck response body + 404 + unma
   // under the node:test default timeout, proving this is a bounded wait, not a hang.
   assert.ok(elapsedMs < 15_000, `expected the run to terminate well within a bounded window, took ${elapsedMs}ms`);
 
-  const runDir = path.join(outputDir, manifest.runId);
+  const runDir = path.join(outputDir, manifest.runFolderName);
+  const debugDir = path.join(runDir, 'debug');
 
   // --- /en/404 must never be navigated to. ---
   const navigations = callLog.filter((entry) => entry.startsWith('navigate:'));
@@ -190,9 +193,10 @@ test('FIX-09: local SpinBoss-shaped fixture — stuck response body + 404 + unma
   );
 
   // --- Arbitrary unmatched paths are not accepted. ---
-  const acceptedInventory = JSON.parse(
-    fs.readFileSync(path.join(runDir, 'accepted-url-inventory.json'), 'utf-8'),
-  ) as UrlDecisionRecord[];
+  const urlInventory = JSON.parse(
+    fs.readFileSync(path.join(runDir, 'url-inventory.json'), 'utf-8'),
+  ) as { accepted: UrlDecisionRecord[]; rejected: UrlDecisionRecord[]; tbd: UrlDecisionRecord[] };
+  const acceptedInventory = urlInventory.accepted;
   const acceptedRawUrls = acceptedInventory.map((row) => row.rawUrl);
   assert.ok(!acceptedRawUrls.includes('/en/404'), 'expected /en/404 to not be in the accepted inventory');
   assert.ok(
@@ -200,9 +204,7 @@ test('FIX-09: local SpinBoss-shaped fixture — stuck response body + 404 + unma
     'expected the ordinary unmatched route to not be in the accepted inventory',
   );
 
-  const rejectedAndTbd = JSON.parse(
-    fs.readFileSync(path.join(runDir, 'deterministic-rejected-urls.json'), 'utf-8'),
-  ) as UrlDecisionRecord[];
+  const rejectedAndTbd = [...urlInventory.rejected, ...urlInventory.tbd];
   const notFoundDecision = rejectedAndTbd.find((row) => row.rawUrl === '/en/404');
   assert.equal(notFoundDecision?.decision, 'rejected', 'expected /en/404 to resolve to an explicit rejected decision');
   assert.equal(notFoundDecision?.ruleId, 'URLR_REJECT_UNCLASSIFIED_SAME_ORIGIN');
@@ -225,7 +227,7 @@ test('FIX-09: local SpinBoss-shaped fixture — stuck response body + 404 + unma
     .sort();
 
   const pageVisits = fs
-    .readFileSync(path.join(runDir, 'page-visits.jsonl'), 'utf-8')
+    .readFileSync(path.join(runDir, 'pages.jsonl'), 'utf-8')
     .trim()
     .split('\n')
     .map((line) => JSON.parse(line)) as Array<{
@@ -258,7 +260,7 @@ test('FIX-09: local SpinBoss-shaped fixture — stuck response body + 404 + unma
 
   // --- The timed-out body scan is recorded as a source error (FIX-06 vocabulary). ---
   const coverage = JSON.parse(
-    fs.readFileSync(path.join(runDir, 'url-source-coverage.json'), 'utf-8'),
+    fs.readFileSync(path.join(debugDir, 'url-source-coverage.json'), 'utf-8'),
   ) as SourceCoverageRecord[];
   const bodyTokenCoverage = coverage.find((row) => row.sourceFamily === 'network_body_url_token');
   assert.equal(bodyTokenCoverage?.status, 'error', 'expected the stuck body scan to surface as an explicit error status');
@@ -269,7 +271,7 @@ test('FIX-09: local SpinBoss-shaped fixture — stuck response body + 404 + unma
 
   // --- HTML and passive traces exist for successful pages. ---
   const pageSnapshots = fs
-    .readFileSync(path.join(runDir, 'page-snapshots.jsonl'), 'utf-8')
+    .readFileSync(path.join(debugDir, 'page-snapshots.jsonl'), 'utf-8')
     .trim()
     .split('\n')
     .map((line) => JSON.parse(line)) as Array<{ requestedUrl: string; htmlPath: string; tracePath: string }>;
@@ -279,14 +281,19 @@ test('FIX-09: local SpinBoss-shaped fixture — stuck response body + 404 + unma
     assert.ok(fs.existsSync(snapshot.tracePath), `expected trace file to exist: ${snapshot.tracePath}`);
   }
   const pageBehavior = fs
-    .readFileSync(path.join(runDir, 'page-behavior.jsonl'), 'utf-8')
+    .readFileSync(path.join(debugDir, 'page-behavior.jsonl'), 'utf-8')
     .trim()
     .split('\n')
     .map((line) => JSON.parse(line));
   assert.equal(pageBehavior.length, 2, 'expected a passive-behavior trace row per successful page');
 
-  // --- All canonical acquisition artifacts are written. ---
-  const canonicalArtifacts = [
+  // --- The 7-item CD-N01 retained artifact contract is written at the run folder root. ---
+  const retainedArtifacts = ['run-manifest.json', 'url-inventory.json', 'pages.jsonl', 'interactions.jsonl', 'corpus', 'json', 'review.html'];
+  for (const name of retainedArtifacts) {
+    assert.ok(fs.existsSync(path.join(runDir, name)), `expected retained artifact to exist: ${name}`);
+  }
+  // --- Debug-only diagnostics (kept here because debugArtifacts: true was requested). ---
+  const debugArtifactNames = [
     'run-context.json',
     'raw-url-candidates.json',
     'url-source-coverage.json',
@@ -297,10 +304,9 @@ test('FIX-09: local SpinBoss-shaped fixture — stuck response body + 404 + unma
     'page-snapshots.jsonl',
     'page-behavior.jsonl',
     'run-events.jsonl',
-    'run-manifest.json',
   ];
-  for (const name of canonicalArtifacts) {
-    assert.ok(fs.existsSync(path.join(runDir, name)), `expected canonical artifact to exist: ${name}`);
+  for (const name of debugArtifactNames) {
+    assert.ok(fs.existsSync(path.join(debugDir, name)), `expected debug artifact to exist: ${name}`);
   }
 
   // --- The manifest produces reconciled counts and a terminal run status. ---

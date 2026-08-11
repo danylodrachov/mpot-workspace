@@ -42,6 +42,18 @@ export function stablePageBasename(index: number, url: string): string {
   return `${String(index).padStart(4, '0')}-${slug}-${hash}`;
 }
 
+// CD-N01: shared slug style for anything derived from free-text (casino names, geo codes) that
+// must become a filesystem-safe path segment — lowercase, non-alphanumeric runs collapsed to a
+// single hyphen, leading/trailing hyphens trimmed. Mirrors the slug logic already used inside
+// stablePageBasename above so run-folder names and page filenames stay visually consistent.
+export function slugify(value: string): string {
+  const slug = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return slug || 'unknown';
+}
+
 export function makeRunId(now = new Date()): string {
   return `${now.toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`;
 }

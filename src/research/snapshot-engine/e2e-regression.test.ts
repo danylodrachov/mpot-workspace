@@ -4,7 +4,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { crawlSite } from './crawler.ts';
-import { runPostRunReview } from './post-run-review.ts';
 import type { BrowserContext, Page } from 'playwright';
 import type {
   ReviewInputDocument,
@@ -39,10 +38,12 @@ import type {
 // (crawl-loop plumbing/watchdog coverage), page-capture.test.ts (settle-routine unit coverage),
 // url-discovery.test.ts (extractor unit coverage), or regression-spinboss.test.ts (FIX-09's
 // narrower stuck-response-body + 404/TBD regression). It is the one comprehensive, deterministic,
-// full-pipeline regression: crawlSite() end to end, then runPostRunReview() over its own output,
-// with no scorer/relevance-gate/visit-plan/field-collector/normaliser/gap-probe/browser-capable
-// LLM agent import anywhere in this file (only crawler.ts's and post-run-review.ts's own public
-// entry points are used).
+// full-pipeline regression: crawlSite() end to end, with no scorer/relevance-gate/visit-plan/
+// field-collector/normaliser/gap-probe/browser-capable LLM agent import anywhere in this file
+// (only crawler.ts's own public entry points are used). CD-N02: review.html is now rendered
+// deterministically by review-renderer.ts as part of crawlSite() itself, superseding the legacy
+// post-run-review.ts/discovery-reviewer LLM-handoff flow (deleted — see review-renderer.test.ts
+// for its own dedicated coverage).
 
 interface FakeFrame {
   url(): string;
@@ -242,37 +243,39 @@ test('FIX-06: end-to-end regression — deterministic snapshot-engine pipeline o
     context,
     page,
     entryUrl: ENTRY_URL,
+    casinoName: 'Example Casino',
     outputDir,
     templateDir,
     settleMs: 2_000,
     navigationTimeoutMs: 1_000,
+    debugArtifacts: true,
   });
 
-  const runDir = path.join(outputDir, manifest.runId);
+  const runDir = path.join(outputDir, manifest.runFolderName);
+  const debugDir = path.join(runDir, 'debug');
 
-  const acceptedInventory = JSON.parse(
-    fs.readFileSync(path.join(runDir, 'accepted-url-inventory.json'), 'utf-8'),
-  ) as UrlDecisionRecord[];
-  const rejectedAndTbd = JSON.parse(
-    fs.readFileSync(path.join(runDir, 'deterministic-rejected-urls.json'), 'utf-8'),
-  ) as UrlDecisionRecord[];
+  const urlInventory = JSON.parse(
+    fs.readFileSync(path.join(runDir, 'url-inventory.json'), 'utf-8'),
+  ) as UrlInventoryDocument;
+  const acceptedInventory = urlInventory.accepted;
+  const rejectedAndTbd = [...urlInventory.rejected, ...urlInventory.tbd];
   const pageVisits = fs
-    .readFileSync(path.join(runDir, 'page-visits.jsonl'), 'utf-8')
+    .readFileSync(path.join(runDir, 'pages.jsonl'), 'utf-8')
     .trim()
     .split('\n')
     .map((line) => JSON.parse(line)) as VisitedPageRecord[];
   const pageSnapshots = fs
-    .readFileSync(path.join(runDir, 'page-snapshots.jsonl'), 'utf-8')
+    .readFileSync(path.join(debugDir, 'page-snapshots.jsonl'), 'utf-8')
     .trim()
     .split('\n')
     .map((line) => JSON.parse(line)) as Array<{ requestedUrl: string; htmlPath: string; tracePath: string }>;
   const pageBehavior = fs
-    .readFileSync(path.join(runDir, 'page-behavior.jsonl'), 'utf-8')
+    .readFileSync(path.join(debugDir, 'page-behavior.jsonl'), 'utf-8')
     .trim()
     .split('\n')
     .map((line) => JSON.parse(line));
   const coverage = JSON.parse(
-    fs.readFileSync(path.join(runDir, 'url-source-coverage.json'), 'utf-8'),
+    fs.readFileSync(path.join(debugDir, 'url-source-coverage.json'), 'utf-8'),
   ) as SourceCoverageRecord[];
 
   // --- 1. Only deterministic URL Rules decide visitability: every accepted row carries a
@@ -413,7 +416,9 @@ test('FIX-06: end-to-end regression — deterministic snapshot-engine pipeline o
   // assertions): it re-derives its own review-input.json from the raw, pre-merge
   // url-clean-decisions.jsonl log (one row per discovered alias, not per canonical route), which
   // is a distinct, already-existing FIX-05 behavior this ticket does not touch. ---
-  const reviewInput = JSON.parse(fs.readFileSync(path.join(runDir, 'review-input.json'), 'utf-8')) as ReviewInputDocument;
+  // CD-N01: review-input.json is now debug-only (review-input.ts's raw output), written under
+  // debug/ rather than the run folder root.
+  const reviewInput = JSON.parse(fs.readFileSync(path.join(debugDir, 'review-input.json'), 'utf-8')) as ReviewInputDocument;
   assert.equal(reviewInput.templateFiles.length, 2, 'expected the two real templates, with dropdowns.json excluded');
   assert.ok(reviewInput.templateFiles.every((templatePath) => !templatePath.endsWith('dropdowns.json')));
   assert.equal(reviewInput.acceptedTargets.length, 7);
@@ -424,26 +429,25 @@ test('FIX-06: end-to-end regression — deterministic snapshot-engine pipeline o
   assert.ok(reviewInput.tbdByRule.some((row) => row.ruleId === 'URLR_TBD_API'));
   assert.ok(reviewInput.tbdByRule.some((row) => row.ruleId === 'URLR_TBD_ASSET'));
   assert.ok(reviewInput.sourceFamilyCoverage.length > 0);
+  // fullUrlInventoryPath now points at the retained top-level url-inventory.json (see CD-N01
+  // review-input.ts change: writeReviewInput now accepts an explicit urlInventoryPath).
+  assert.equal(reviewInput.fullUrlInventoryPath, path.join(runDir, 'url-inventory.json'));
   assert.ok(fs.existsSync(reviewInput.fullUrlInventoryPath), 'expected the full unbounded url-inventory.json evidence file to exist');
-  const urlInventory = JSON.parse(fs.readFileSync(reviewInput.fullUrlInventoryPath, 'utf-8')) as UrlInventoryDocument;
   assert.equal(urlInventory.accepted.length, 7);
 
-  // The reviewer gate itself: reads only saved deterministic evidence (never browses), refuses
-  // non-terminal runs, cross-validates every snapshot traces to a real visited record with HTML
-  // on disk, and hands off to the discovery-reviewer subagent — never a raw model/API call.
-  const { bundle, handoff } = await runPostRunReview(runDir);
-  assert.equal(bundle.manifest.status, 'complete');
-  assert.equal(bundle.runContext?.templateDir, templateDir);
-  assert.equal(handoff.reviewInputPath, path.join(runDir, 'review-input.json'));
-  assert.equal(handoff.templateDir, templateDir);
-  assert.equal(handoff.agentName, 'discovery-reviewer');
-  assert.equal(handoff.discoveryReviewOutputPath, path.join(runDir, 'discovery-review.json'));
+  // CD-N02: review.html is now a deterministic render produced inline by crawlSite() itself
+  // (see review-renderer.ts) — no separate reviewer-gate step, no LLM/agent handoff.
+  const reviewHtml = fs.readFileSync(path.join(runDir, 'review.html'), 'utf8');
+  assert.ok(reviewHtml.includes('id="run-summary"'));
+  assert.ok(reviewHtml.includes('id="json-results"'));
+  assert.ok(reviewHtml.includes('id="product-collections"'));
+  assert.ok(reviewHtml.includes('id="interaction-exceptions"'));
 
   // --- 12. Structural guarantee that no legacy scorer/relevance-gate/visit-plan/field-collector/
   // normaliser/gap-probe/browser-capable-LLM-agent module is invoked: this file imports nothing
-  // outside crawler.ts, post-run-review.ts and types.ts (snapshot-engine's own deterministic
-  // public surface), and the accepted-target/rejected/tbd counts above only ever moved through
-  // decideUrl()'s URL Rules — no scoring/priority/confidence field appears anywhere above. ---
+  // outside crawler.ts and types.ts (snapshot-engine's own deterministic public surface), and the
+  // accepted-target/rejected/tbd counts above only ever moved through decideUrl()'s URL Rules —
+  // no scoring/priority/confidence field appears anywhere above. ---
   assert.equal(manifest.status, 'complete');
   assert.equal(manifest.counts.accepted, 7);
   assert.equal(manifest.counts.visited, 7);

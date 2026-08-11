@@ -3,6 +3,7 @@ import test from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { crawlSite, SOURCE_FAMILIES } from './crawler.ts';
 import type { BrowserContext, Page } from 'playwright';
 import type { SourceCoverageRecord, SourceFamilyStatus } from './types.ts';
@@ -134,6 +135,18 @@ function makeOutputDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'crawler-test-'));
 }
 
+// CD-N01: the run folder is named from casino/geo/timestamp, not runId — manifest.runFolderName
+// is the on-disk directory name.
+function runDirOf(outputDir: string, manifest: { runFolderName: string }): string {
+  return path.join(outputDir, manifest.runFolderName);
+}
+
+// CD-N01: debug-only diagnostics only survive on disk (under `debug/`) when debugArtifacts was
+// requested for the run.
+function debugDirOf(outputDir: string, manifest: { runFolderName: string }): string {
+  return path.join(runDirOf(outputDir, manifest), 'debug');
+}
+
 test('discovery/filtering (Phase 1-3) completes before the first accepted-page visit (Phase 5)', async () => {
   const callLog: string[] = [];
   const entryUrl = 'https://example.test/';
@@ -143,7 +156,7 @@ test('discovery/filtering (Phase 1-3) completes before the first accepted-page v
     callLog,
   });
 
-  await crawlSite({ context, page, entryUrl, outputDir: makeOutputDir(), settleMs: 0, navigationTimeoutMs: 1000 });
+  await crawlSite({ context, page, entryUrl, casinoName: 'Example Casino', outputDir: makeOutputDir(), settleMs: 0, navigationTimeoutMs: 1000 });
 
   // Both accepted URLs must have been discovered (no navigate: calls before them) — the
   // fake bootstrap-link source only yields candidates on the very first (pre-navigation)
@@ -166,16 +179,18 @@ test('accepted inventory count/contents are unchanged from freeze through run co
   });
 
   const outputDir = makeOutputDir();
-  const manifest = await crawlSite({ context, page, entryUrl, outputDir, settleMs: 0, navigationTimeoutMs: 1000 });
+  const manifest = await crawlSite({ context, page, entryUrl, casinoName: 'Example Casino', outputDir, settleMs: 0, navigationTimeoutMs: 1000 });
 
   assert.equal(manifest.counts.accepted, 3);
   assert.equal(manifest.counts.visited, 3);
   assert.equal(manifest.counts.failed, 0);
 
-  const acceptedInventory = JSON.parse(
-    fs.readFileSync(path.join(outputDir, manifest.runId, 'accepted-url-inventory.json'), 'utf-8'),
+  const urlInventory = JSON.parse(
+    fs.readFileSync(path.join(runDirOf(outputDir, manifest), 'url-inventory.json'), 'utf-8'),
   );
-  const acceptedUrls: string[] = acceptedInventory.map((row: { canonicalUrl?: string }) => row.canonicalUrl).sort();
+  const acceptedUrls: string[] = urlInventory.accepted
+    .map((row: { canonicalUrl?: string }) => row.canonicalUrl)
+    .sort();
   assert.deepEqual(acceptedUrls, [
     'https://example.test/bonuses',
     'https://example.test/deposit',
@@ -183,7 +198,7 @@ test('accepted inventory count/contents are unchanged from freeze through run co
   ]);
 
   const pageVisitsRaw = fs
-    .readFileSync(path.join(outputDir, manifest.runId, 'page-visits.jsonl'), 'utf-8')
+    .readFileSync(path.join(runDirOf(outputDir, manifest), 'pages.jsonl'), 'utf-8')
     .trim()
     .split('\n');
   const visitedPages = pageVisitsRaw.map((line) => JSON.parse(line));
@@ -205,23 +220,35 @@ test('a URL discovered while visiting an accepted page is recorded as an observa
   });
 
   const outputDir = makeOutputDir();
-  const manifest = await crawlSite({ context, page, entryUrl, outputDir, settleMs: 0, navigationTimeoutMs: 1000 });
+  const manifest = await crawlSite({
+    context,
+    page,
+    entryUrl,
+    casinoName: 'Example Casino',
+    outputDir,
+    settleMs: 0,
+    navigationTimeoutMs: 1000,
+    debugArtifacts: true,
+  });
 
   const navigations = callLog.filter((entry) => entry.startsWith('navigate:'));
   assert.equal(navigations.length, 1, 'exactly one navigation is expected for the single accepted URL');
   assert.equal(manifest.counts.visited, 1);
 
   const postVisitObservations = JSON.parse(
-    fs.readFileSync(path.join(outputDir, manifest.runId, 'post-visit-observations.json'), 'utf-8'),
+    fs.readFileSync(path.join(debugDirOf(outputDir, manifest), 'post-visit-observations.json'), 'utf-8'),
   );
   // The visited page itself is re-scanned passively (discoverFromPage runs post-visit too);
   // that must land in observations, never in a second navigation.
   assert.ok(Array.isArray(postVisitObservations));
 });
 
-// FIX-05: run-level artifacts must be written incrementally, so a hang/crash mid-crawl still
-// leaves a complete factual ledger for every page attempted before the crash.
-test('a crash mid-crawl (after page 2 of 5) still leaves valid frozen discovery artifacts and terminal per-page records for pages 1-2 only', async () => {
+// FIX-05/CD-N01: run-level artifacts must be written incrementally, so a hang/crash mid-crawl
+// still leaves a complete factual ledger for every page attempted before the crash — the
+// retained-contract pages.jsonl on disk directly, and every raw diagnostic packaged into
+// debug.zip (CD-N01 requirement: any partial/error termination packages debug.zip
+// unconditionally, regardless of --debug-artifacts).
+test('a crash mid-crawl (after page 2 of 5) still leaves valid pages.jsonl records and a debug.zip for pages 1-2 only', async () => {
   const callLog: string[] = [];
   const entryUrl = 'https://example.test/';
   const { page, context } = makeFakeEnvironment({
@@ -233,7 +260,7 @@ test('a crash mid-crawl (after page 2 of 5) still leaves valid frozen discovery 
 
   const outputDir = makeOutputDir();
   await assert.rejects(
-    crawlSite({ context, page, entryUrl, outputDir, settleMs: 0, navigationTimeoutMs: 1000 }),
+    crawlSite({ context, page, entryUrl, casinoName: 'Example Casino', outputDir, settleMs: 0, navigationTimeoutMs: 1000 }),
     /simulated crash mid-crawl/,
   );
 
@@ -241,9 +268,36 @@ test('a crash mid-crawl (after page 2 of 5) still leaves valid frozen discovery 
   const runDirs = fs.readdirSync(outputDir);
   assert.equal(runDirs.length, 1);
   const runDir = path.join(outputDir, runDirs[0]!);
+  assert.match(runDirs[0]!, /^example-casino-xx-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}$/, 'expected the CD-N01 folder-naming pattern');
 
-  // Discovery artifacts (canonical names 1-5) must exist and be valid, complete JSON — they
-  // were written right after Phase 4 freeze, well before the crash occurred mid-crawl.
+  const readJsonl = (filePath: string): unknown[] => {
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    const lines = raw.split('\n').filter((line) => line.trim().length > 0);
+    return lines.map((line) => JSON.parse(line));
+  };
+
+  // pages.jsonl (retained contract) must have exactly the terminal records for pages 1-2, live
+  // directly on disk — never lost even though the run never reached a terminal manifest.
+  const pageVisits = readJsonl(path.join(runDir, 'pages.jsonl')) as Array<{ requestedUrl: string; status: string }>;
+  assert.equal(pageVisits.length, 2, 'only the 2 pages completed before the crash should have terminal records');
+  assert.deepEqual(
+    pageVisits.map((row) => row.requestedUrl).sort(),
+    ['https://example.test/bonuses', 'https://example.test/deposit'],
+  );
+  assert.ok(pageVisits.every((row) => row.status === 'visited'));
+
+  // CD-N01: partial/error termination packages every debug-only diagnostic into debug.zip
+  // unconditionally — the raw .debug working directory must never be left behind.
+  assert.equal(fs.existsSync(path.join(runDir, 'debug')), false, 'expected the raw debug working directory to be removed once zipped');
+  const debugZipPath = path.join(runDir, 'debug.zip');
+  assert.ok(fs.existsSync(debugZipPath), 'expected debug.zip to be created on a crashed run');
+
+  const extractDir = fs.mkdtempSync(path.join(os.tmpdir(), 'crawler-test-debug-extract-'));
+  execFileSync('unzip', ['-o', '-q', debugZipPath, '-d', extractDir]);
+
+  // Discovery artifacts (raw candidates / source coverage / decision logs) must exist inside the
+  // zip and be valid, complete JSON — they were written right after Phase 4 freeze, well before
+  // the crash occurred mid-crawl.
   const discoveryArtifacts = [
     'run-context.json',
     'raw-url-candidates.json',
@@ -252,42 +306,34 @@ test('a crash mid-crawl (after page 2 of 5) still leaves valid frozen discovery 
     'deterministic-rejected-urls.json',
   ];
   for (const name of discoveryArtifacts) {
-    const filePath = path.join(runDir, name);
-    assert.ok(fs.existsSync(filePath), `expected discovery artifact to exist: ${name}`);
+    const filePath = path.join(extractDir, name);
+    assert.ok(fs.existsSync(filePath), `expected debug artifact to exist inside debug.zip: ${name}`);
     assert.doesNotThrow(() => JSON.parse(fs.readFileSync(filePath, 'utf-8')), `expected ${name} to be valid JSON`);
   }
 
   const acceptedInventory = JSON.parse(
-    fs.readFileSync(path.join(runDir, 'accepted-url-inventory.json'), 'utf-8'),
+    fs.readFileSync(path.join(extractDir, 'accepted-url-inventory.json'), 'utf-8'),
   ) as Array<{ canonicalUrl?: string }>;
   assert.equal(acceptedInventory.length, 5, 'all 5 accepted URLs must be recorded as frozen discovery output');
 
-  // page-visits.jsonl / page-snapshots.jsonl / page-behavior.jsonl must contain exactly the
-  // terminal records for pages 1-2 — not a partial/corrupt entry for page 3, and not missing
-  // entries for 1-2.
-  const readJsonl = (name: string): unknown[] => {
-    const filePath = path.join(runDir, name);
-    const raw = fs.readFileSync(filePath, 'utf-8');
-    const lines = raw.split('\n').filter((line) => line.trim().length > 0);
-    return lines.map((line) => JSON.parse(line));
-  };
-
-  const pageVisits = readJsonl('page-visits.jsonl') as Array<{ requestedUrl: string; status: string }>;
-  assert.equal(pageVisits.length, 2, 'only the 2 pages completed before the crash should have terminal visit records');
+  // page-visits.jsonl / page-snapshots.jsonl / page-behavior.jsonl inside the zip must contain
+  // exactly the terminal records for pages 1-2 — not a partial/corrupt entry for page 3, and not
+  // missing entries for 1-2.
+  const pageVisitsDebug = readJsonl(path.join(extractDir, 'page-visits.jsonl')) as Array<{ requestedUrl: string; status: string }>;
+  assert.equal(pageVisitsDebug.length, 2, 'only the 2 pages completed before the crash should have terminal visit records');
   assert.deepEqual(
-    pageVisits.map((row) => row.requestedUrl).sort(),
+    pageVisitsDebug.map((row) => row.requestedUrl).sort(),
     ['https://example.test/bonuses', 'https://example.test/deposit'],
   );
-  assert.ok(pageVisits.every((row) => row.status === 'visited'));
 
-  const pageSnapshots = readJsonl('page-snapshots.jsonl') as Array<{ requestedUrl: string }>;
+  const pageSnapshots = readJsonl(path.join(extractDir, 'page-snapshots.jsonl')) as Array<{ requestedUrl: string }>;
   assert.equal(pageSnapshots.length, 2, 'both completed pages produced a page-snapshots.jsonl row');
   assert.deepEqual(
     pageSnapshots.map((row) => row.requestedUrl).sort(),
     ['https://example.test/bonuses', 'https://example.test/deposit'],
   );
 
-  const pageBehavior = readJsonl('page-behavior.jsonl') as Array<{ requestedUrl: string }>;
+  const pageBehavior = readJsonl(path.join(extractDir, 'page-behavior.jsonl')) as Array<{ requestedUrl: string }>;
   assert.equal(pageBehavior.length, 2, 'both completed pages produced a page-behavior.jsonl row');
   assert.deepEqual(
     pageBehavior.map((row) => row.requestedUrl).sort(),
@@ -296,7 +342,7 @@ test('a crash mid-crawl (after page 2 of 5) still leaves valid frozen discovery 
 
   // run-events.jsonl must be a valid, non-empty append log describing at least the lifecycle
   // up through the crash (run_start, discovery_complete, crawl_start, page_attempt/complete).
-  const runEvents = readJsonl('run-events.jsonl') as Array<{ event: string }>;
+  const runEvents = readJsonl(path.join(extractDir, 'run-events.jsonl')) as Array<{ event: string }>;
   assert.ok(runEvents.length > 0);
   assert.ok(runEvents.some((row) => row.event === 'run_start'));
   assert.ok(runEvents.some((row) => row.event === 'discovery_complete'));
@@ -325,10 +371,10 @@ test('every configured source family appears exactly once in url-source-coverage
   });
 
   const outputDir = makeOutputDir();
-  const manifest = await crawlSite({ context, page, entryUrl, outputDir, settleMs: 0, navigationTimeoutMs: 1000 });
+  const manifest = await crawlSite({ context, page, entryUrl, casinoName: 'Example Casino', outputDir, settleMs: 0, navigationTimeoutMs: 1000, debugArtifacts: true });
 
   const coverage = JSON.parse(
-    fs.readFileSync(path.join(outputDir, manifest.runId, 'url-source-coverage.json'), 'utf-8'),
+    fs.readFileSync(path.join(debugDirOf(outputDir, manifest), 'url-source-coverage.json'), 'utf-8'),
   ) as SourceCoverageRecord[];
 
   // Exactly one record per configured source family, no duplicates, none missing.
@@ -389,10 +435,10 @@ test('a FIX-01 response-body-scan timeout surfaces as a non-silent error status 
   };
 
   const outputDir = makeOutputDir();
-  const manifest = await crawlSite({ context, page, entryUrl, outputDir, settleMs: 0, navigationTimeoutMs: 1000 });
+  const manifest = await crawlSite({ context, page, entryUrl, casinoName: 'Example Casino', outputDir, settleMs: 0, navigationTimeoutMs: 1000, debugArtifacts: true });
 
   const coverage = JSON.parse(
-    fs.readFileSync(path.join(outputDir, manifest.runId, 'url-source-coverage.json'), 'utf-8'),
+    fs.readFileSync(path.join(debugDirOf(outputDir, manifest), 'url-source-coverage.json'), 'utf-8'),
   ) as SourceCoverageRecord[];
   const bodyTokenCoverage = coverage.find((row) => row.sourceFamily === 'network_body_url_token');
 
@@ -428,6 +474,7 @@ test('a synthetic never-resolving page capture produces a terminal page_capture_
     context,
     page,
     entryUrl,
+    casinoName: 'Example Casino',
     outputDir,
     settleMs: 0,
     navigationTimeoutMs: 1000,
@@ -441,7 +488,7 @@ test('a synthetic never-resolving page capture produces a terminal page_capture_
   assert.equal(manifest.status, 'complete', 'the run itself still completes — only the one page is terminal-failed');
 
   const pageVisits = JSON.parse(
-    `[${fs.readFileSync(path.join(outputDir, manifest.runId, 'page-visits.jsonl'), 'utf-8').trim().split('\n').join(',')}]`,
+    `[${fs.readFileSync(path.join(runDirOf(outputDir, manifest), 'pages.jsonl'), 'utf-8').trim().split('\n').join(',')}]`,
   ) as Array<{ status: string; failureReason?: string }>;
   assert.equal(pageVisits.length, 1);
   assert.equal(pageVisits[0]!.status, 'failed');
@@ -468,17 +515,19 @@ test('a stuck robots/sitemap discovery batch resolves to an error terminal statu
     context,
     page,
     entryUrl,
+    casinoName: 'Example Casino',
     outputDir,
     settleMs: 0,
     navigationTimeoutMs: 1000,
     robotsSitemapBatchTimeoutMs: 50,
+    debugArtifacts: true,
   });
   const elapsedMs = Date.now() - startedAt;
 
   assert.ok(elapsedMs < 2000, `crawlSite took ${elapsedMs}ms, expected it to return near the 50ms robots/sitemap deadline`);
 
   const coverage = JSON.parse(
-    fs.readFileSync(path.join(outputDir, manifest.runId, 'url-source-coverage.json'), 'utf-8'),
+    fs.readFileSync(path.join(debugDirOf(outputDir, manifest), 'url-source-coverage.json'), 'utf-8'),
   ) as SourceCoverageRecord[];
   const robotsSitemap = coverage.find((row) => row.sourceFamily === 'robots_sitemap');
   const sitemapUrl = coverage.find((row) => row.sourceFamily === 'sitemap_url');
@@ -501,7 +550,7 @@ test('FIX-03: locale aliases (bare + /en/ prefixed) merge into one visit each, p
   });
 
   const outputDir = makeOutputDir();
-  const manifest = await crawlSite({ context, page, entryUrl, outputDir, settleMs: 0, navigationTimeoutMs: 1000 });
+  const manifest = await crawlSite({ context, page, entryUrl, casinoName: 'Example Casino', outputDir, settleMs: 0, navigationTimeoutMs: 1000 });
 
   // Two canonical routes (payments, rules), not four separate aliases.
   assert.equal(manifest.counts.accepted, 2, 'locale aliases must collapse into one canonical route each');
@@ -510,9 +559,10 @@ test('FIX-03: locale aliases (bare + /en/ prefixed) merge into one visit each, p
   const navigations = callLog.filter((entry) => entry.startsWith('navigate:'));
   assert.equal(navigations.length, 2, 'exactly one navigation each for payments and rules, not two');
 
-  const acceptedInventory = JSON.parse(
-    fs.readFileSync(path.join(outputDir, manifest.runId, 'accepted-url-inventory.json'), 'utf-8'),
-  ) as Array<{ canonicalUrl?: string; aliasUrls?: string[] }>;
+  const urlInventory = JSON.parse(
+    fs.readFileSync(path.join(runDirOf(outputDir, manifest), 'url-inventory.json'), 'utf-8'),
+  ) as { accepted: Array<{ canonicalUrl?: string; aliasUrls?: string[] }> };
+  const acceptedInventory = urlInventory.accepted;
   const canonicalUrls = acceptedInventory.map((row) => row.canonicalUrl).sort();
   assert.deepEqual(canonicalUrls, [
     'https://ws43--westace.com/payments',
@@ -520,7 +570,7 @@ test('FIX-03: locale aliases (bare + /en/ prefixed) merge into one visit each, p
   ], 'canonical identity is locale-agnostic — bare path, not a localized alias');
 
   const pageVisitsRaw = fs
-    .readFileSync(path.join(outputDir, manifest.runId, 'page-visits.jsonl'), 'utf-8')
+    .readFileSync(path.join(runDirOf(outputDir, manifest), 'pages.jsonl'), 'utf-8')
     .trim()
     .split('\n');
   const visitedPages = pageVisitsRaw.map((line) => JSON.parse(line)) as Array<{
@@ -564,6 +614,7 @@ test('a run-level deadline reached mid-crawl produces a partial manifest status,
     context,
     page,
     entryUrl,
+    casinoName: 'Example Casino',
     outputDir,
     settleMs: 0,
     navigationTimeoutMs: 1000,
@@ -575,7 +626,7 @@ test('a run-level deadline reached mid-crawl produces a partial manifest status,
   assert.ok(manifest.counts.visited < 3, 'the watchdog must have stopped the crawl before every accepted URL was attempted');
 
   const pageVisits = JSON.parse(
-    `[${fs.readFileSync(path.join(outputDir, manifest.runId, 'page-visits.jsonl'), 'utf-8').trim().split('\n').join(',')}]`,
+    `[${fs.readFileSync(path.join(runDirOf(outputDir, manifest), 'pages.jsonl'), 'utf-8').trim().split('\n').join(',')}]`,
   ) as Array<{ status: string; failureReason?: string }>;
   assert.equal(pageVisits.length, 3, 'every accepted URL still gets exactly one terminal record, even the ones never attempted');
   const notAttempted = pageVisits.filter((row) => row.failureReason === 'run_deadline_reached');
@@ -584,4 +635,162 @@ test('a run-level deadline reached mid-crawl produces a partial manifest status,
     notAttempted.every((row) => row.status === 'failed'),
     'a URL never attempted because of the run deadline must never be marked successful',
   );
+});
+
+// CD-N07: a page whose capture step never resolves (no timeout individually caught inside
+// capturePage's own bounded sub-steps — simulated here directly, since the fake environment's
+// page.content() hang below is itself bound by pageCaptureTimeoutMs in the previous test; this
+// test proves the SEPARATE no-progress watchdog also bounds the run even when the per-page
+// timeout is generous) must not hang the whole run — the no-progress watchdog fires and the run
+// terminates as partial or error, never left unresolved.
+test('CD-N07: a no-progress watchdog bounds the run when a page capture never resolves, producing a terminal partial/error status', async () => {
+  const callLog: string[] = [];
+  const entryUrl = 'https://example.test/';
+  const { page, context } = makeFakeEnvironment({
+    entryUrl,
+    bootstrapLinks: ['/bonuses'],
+    callLog,
+  });
+
+  // Make page.content() hang forever, simulating a stuck profiler/capture step. The per-page
+  // pageCaptureTimeoutMs budget below is set generously large (well beyond the test's own bound)
+  // so this test isolates the no-progress watchdog's own bound, not the per-page timeout.
+  (page as unknown as { content: () => Promise<string> }).content = () => new Promise<string>(() => {
+    /* stuck forever */
+  });
+
+  const outputDir = makeOutputDir();
+  const startedAt = Date.now();
+  const manifest = await crawlSite({
+    context,
+    page,
+    entryUrl,
+    casinoName: 'Example Casino',
+    outputDir,
+    settleMs: 0,
+    navigationTimeoutMs: 1000,
+    pageCaptureTimeoutMs: 60_000,
+    runtimeBudgetOverrides: { noProgressWatchdogMs: 50 },
+  });
+  const elapsedMs = Date.now() - startedAt;
+
+  assert.ok(
+    elapsedMs < 5_000,
+    `crawlSite took ${elapsedMs}ms, expected it to terminate near the 50ms no-progress watchdog budget, not the 60s page-capture deadline`,
+  );
+  assert.notEqual(manifest.status, undefined);
+  assert.ok(
+    manifest.status === 'partial' || manifest.status === 'error',
+    `expected a watchdog-triggered run to resolve to 'partial' or 'error', got '${manifest.status}'`,
+  );
+  assert.notEqual(manifest.status, 'complete', 'a no-progress timeout must never be treated as a successful run completion');
+
+  const pageVisits = JSON.parse(
+    `[${fs.readFileSync(path.join(runDirOf(outputDir, manifest), 'pages.jsonl'), 'utf-8').trim().split('\n').join(',')}]`,
+  ) as Array<{ status: string; failureReason?: string }>;
+  assert.equal(pageVisits.length, 1);
+  assert.equal(pageVisits[0]!.status, 'failed');
+  assert.equal(pageVisits[0]!.failureReason, 'no_progress_watchdog');
+});
+
+// CD-N01: the run folder name, the 7-item retained artifact contract, and the debug
+// discard-by-default behavior on an ordinary successful run.
+test('CD-N01: run folder is named <casino-slug>-<geo>-<date>-<time>, retains exactly the 7-item contract, and discards debug diagnostics by default', async () => {
+  const callLog: string[] = [];
+  const entryUrl = 'https://example.test/';
+  const { page, context } = makeFakeEnvironment({
+    entryUrl,
+    bootstrapLinks: ['/bonuses'],
+    callLog,
+  });
+
+  const outputDir = makeOutputDir();
+  const manifest = await crawlSite({
+    context,
+    page,
+    entryUrl,
+    casinoName: 'WestAce Casino!!',
+    geo: 'NO',
+    outputDir,
+    settleMs: 0,
+    navigationTimeoutMs: 1000,
+  });
+
+  assert.equal(manifest.status, 'complete');
+  assert.match(
+    manifest.runFolderName,
+    /^westace-casino-no-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}$/,
+    'expected <casino-slug>-<geo>-<YYYY-MM-DD>-<HH-mm-ss>',
+  );
+  const runDirs = fs.readdirSync(outputDir);
+  assert.deepEqual(runDirs, [manifest.runFolderName], 'expected the folder on disk to match manifest.runFolderName exactly');
+  // The opaque runId is never used as, or embedded in, the folder name.
+  assert.ok(!manifest.runFolderName.includes(manifest.runId));
+
+  const runDir = runDirOf(outputDir, manifest);
+  const entries = fs.readdirSync(runDir).sort();
+  assert.deepEqual(
+    entries,
+    ['corpus', 'interactions.jsonl', 'json', 'pages.jsonl', 'review.html', 'run-manifest.json', 'url-inventory.json'].sort(),
+    'expected exactly the 7-item retained contract at the run folder root, with debug diagnostics discarded (no --debug-artifacts, ordinary success)',
+  );
+  assert.ok(fs.statSync(path.join(runDir, 'corpus')).isDirectory());
+  assert.ok(fs.statSync(path.join(runDir, 'json')).isDirectory());
+
+  // No raw HTML/trace, no debug.zip, and no debug/ directory left behind on an ordinary
+  // discard-by-default success.
+  assert.equal(fs.existsSync(path.join(runDir, 'debug')), false);
+  assert.equal(fs.existsSync(path.join(runDir, 'debug.zip')), false);
+
+  // run-manifest.json/url-inventory.json/pages.jsonl/interactions.jsonl reconcile: manifest
+  // counts.visited matches the number of 'visited' rows in pages.jsonl, and
+  // counts.interactionRecords matches interactions.jsonl's line count.
+  const pagesJsonl = fs
+    .readFileSync(path.join(runDir, 'pages.jsonl'), 'utf-8')
+    .trim()
+    .split('\n')
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line)) as Array<{ status: string }>;
+  assert.equal(pagesJsonl.filter((row) => row.status === 'visited').length, manifest.counts.visited);
+  assert.equal(pagesJsonl.length, manifest.counts.accepted);
+
+  const interactionsRaw = fs.readFileSync(path.join(runDir, 'interactions.jsonl'), 'utf-8').trim();
+  const interactionLines = interactionsRaw.length > 0 ? interactionsRaw.split('\n') : [];
+  assert.equal(interactionLines.length, manifest.counts.interactionRecords);
+});
+
+// CD-N01: a partial/error termination always packages debug.zip, even without --debug-artifacts.
+test('CD-N01: a partial run packages debug.zip unconditionally, without --debug-artifacts', async () => {
+  const callLog: string[] = [];
+  const entryUrl = 'https://example.test/';
+  const { page, context } = makeFakeEnvironment({
+    entryUrl,
+    bootstrapLinks: ['/bonuses', '/deposit', '/terms-and-conditions'],
+    callLog,
+  });
+
+  const originalGoto = (page as unknown as { goto: (url: string) => Promise<{ status: () => number }> }).goto;
+  (page as unknown as { goto: (url: string) => Promise<{ status: () => number }> }).goto = async (url: string) => {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    return originalGoto(url);
+  };
+
+  const outputDir = makeOutputDir();
+  const manifest = await crawlSite({
+    context,
+    page,
+    entryUrl,
+    casinoName: 'Example Casino',
+    outputDir,
+    settleMs: 0,
+    navigationTimeoutMs: 1000,
+    runDeadlineMs: 40,
+    // Deliberately omitted: debugArtifacts. A partial run must still package debug.zip.
+  });
+
+  assert.equal(manifest.status, 'partial');
+  const runDir = runDirOf(outputDir, manifest);
+  assert.equal(fs.existsSync(path.join(runDir, 'debug')), false, 'raw debug directory must never survive a partial run');
+  assert.ok(fs.existsSync(path.join(runDir, 'debug.zip')), 'expected debug.zip on a partial run even without --debug-artifacts');
+  assert.equal(manifest.artifacts.debugZip, path.join(runDir, 'debug.zip'));
 });

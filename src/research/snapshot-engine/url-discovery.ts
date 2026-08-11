@@ -1,18 +1,22 @@
 import type { BrowserContext, Frame, Page, Request, Response, WebSocket } from 'playwright';
 import { scanUrlTokens } from './token-scan.ts';
 import type { RawUrlCandidate, SourceFamily } from './types.ts';
+import { DEFAULT_RUNTIME_BUDGETS } from './runtime-config.ts';
 
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
 const TEXTUAL_CONTENT_TYPE = /(?:json|javascript|ecmascript|text\/|xml|svg)/i;
 
-// Deterministic deadlines: one stuck network response must never block the crawl.
-const RESPONSE_BODY_TIMEOUT_MS = 5_000;
-const FLUSH_DEADLINE_MS = 8_000;
+// CD-N07: deterministic deadlines — one stuck network response must never block the crawl.
+// Derived from the centralized runtime-config budgets so this module has no timeout constant of
+// its own that could silently drift from the documented defaults.
+const RESPONSE_BODY_TIMEOUT_MS = DEFAULT_RUNTIME_BUDGETS.responseBodyScanTimeoutMs;
+const FLUSH_DEADLINE_MS = DEFAULT_RUNTIME_BUDGETS.networkObserverFlushTimeoutMs;
 
-// FIX-07: batch-level deadlines for passive enrichment operations that otherwise loop over an
-// unbounded number of same-domain sources/pages with no overall bound. Reused (not duplicated)
+// FIX-07/CD-N07: batch-level deadlines for passive enrichment operations that otherwise loop over
+// an unbounded number of same-domain sources/pages with no overall bound. Reused (not duplicated)
 // by crawler.ts, which wraps the corresponding batch call with `withTimeout` using these values
-// (overridable per-call for tests).
+// (overridable per-call for tests). Kept as their own exported constants (rather than reusing one
+// of the generic runtime-config budgets) since neither has a 1:1 equivalent in RuntimeBudgets.
 export const TEXT_SOURCE_BATCH_TIMEOUT_MS = 30_000;
 export const ROBOTS_SITEMAP_BATCH_TIMEOUT_MS = 20_000;
 
@@ -191,7 +195,12 @@ function hostnameInScope(hostname: string, allowedHostname: string): boolean {
   return candidate === scope || candidate.endsWith(`.${scope}`);
 }
 
-async function scanResponseBody(response: Response, sink: DiscoverySink, allowedHostname: string): Promise<void> {
+async function scanResponseBody(
+  response: Response,
+  sink: DiscoverySink,
+  allowedHostname: string,
+  responseBodyTimeoutMs: number = RESPONSE_BODY_TIMEOUT_MS,
+): Promise<void> {
   const startedAt = Date.now();
   try {
     const url = new URL(response.url());
@@ -203,8 +212,8 @@ async function scanResponseBody(response: Response, sink: DiscoverySink, allowed
     if (declaredLength > MAX_BODY_BYTES) return;
     const body = await withTimeout(
       response.body(),
-      RESPONSE_BODY_TIMEOUT_MS,
-      `Response body scan exceeded ${RESPONSE_BODY_TIMEOUT_MS}ms deadline for ${response.url()}`,
+      responseBodyTimeoutMs,
+      `Response body scan exceeded ${responseBodyTimeoutMs}ms deadline for ${response.url()}`,
     );
     if (body.byteLength > MAX_BODY_BYTES) return;
     const text = body.toString('utf8');
@@ -251,12 +260,20 @@ export class PassiveNetworkObserver {
   private readonly sink: DiscoverySink;
   private readonly allowedHostname: string;
   private readonly flushDeadlineMs: number;
+  private readonly responseBodyTimeoutMs: number;
 
-  constructor(page: Page, sink: DiscoverySink, allowedHostname: string, flushDeadlineMs: number = FLUSH_DEADLINE_MS) {
+  constructor(
+    page: Page,
+    sink: DiscoverySink,
+    allowedHostname: string,
+    flushDeadlineMs: number = FLUSH_DEADLINE_MS,
+    responseBodyTimeoutMs: number = RESPONSE_BODY_TIMEOUT_MS,
+  ) {
     this.page = page;
     this.sink = sink;
     this.allowedHostname = allowedHostname;
     this.flushDeadlineMs = flushDeadlineMs;
+    this.responseBodyTimeoutMs = responseBodyTimeoutMs;
   }
 
   start(): void {
@@ -295,7 +312,7 @@ export class PassiveNetworkObserver {
       },
     });
     this.sink.recordRun('network_response', { status: 'complete' });
-    const task = scanResponseBody(response, this.sink, this.allowedHostname).finally(() => this.pending.delete(task));
+    const task = scanResponseBody(response, this.sink, this.allowedHostname, this.responseBodyTimeoutMs).finally(() => this.pending.delete(task));
     this.pending.add(task);
   };
 

@@ -85,6 +85,12 @@ export async function writeReviewInput(
     templateDir?: string;
     visited: VisitedPageRecord[];
     decisions: UrlDecisionRecord[];
+    // CD-N01: url-inventory.json is a retained top-level run artifact while review-input.json
+    // (filePath above) now lives in the run's debug-only working area. Defaults to the legacy
+    // sibling-of-filePath location so callers that don't care about the split (e.g.
+    // post-run-review.ts regenerating review-input.json inside an existing run directory) keep
+    // their previous behavior unchanged.
+    urlInventoryPath?: string;
   },
 ): Promise<WriteReviewInputResult> {
   const templates = await listTemplateFiles(args.templateDir);
@@ -96,7 +102,7 @@ export async function writeReviewInput(
   // technical/asset/API noise that a real casino site produces by the thousand) is written to
   // its own on-disk artifact with full provenance. This file is the evidence-of-record; it is
   // never copied into review-input.json below.
-  const urlInventoryPath = path.join(path.dirname(filePath), 'url-inventory.json');
+  const urlInventoryPath = args.urlInventoryPath ?? path.join(path.dirname(filePath), 'url-inventory.json');
   const urlInventory: UrlInventoryDocument = {
     schemaVersion: '1.0',
     runId: args.runId,

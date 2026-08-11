@@ -1,9 +1,11 @@
 import type { Page } from 'playwright';
 import { collectPassiveInteractivity, hasVisibleLoadingIndicator } from './passive-interactivity.ts';
+import { controlledScrollPass, executeInteractionCandidates } from './interaction-delta-profiler.ts';
 import type { AutomaticDialogTrace, PagePassiveTrace, SettleStatus, VisitedPageRecord } from './types.ts';
 import { sha256, stablePageBasename, writeJsonAtomic, writeTextAtomic } from './io.ts';
 import path from 'node:path';
-import type { PassiveNetworkObserver } from './url-discovery.ts';
+import { withTimeout, TimeoutError, type PassiveNetworkObserver } from './url-discovery.ts';
+import { DEFAULT_RUNTIME_BUDGETS } from './runtime-config.ts';
 
 export interface PageCaptureOptions {
   page: Page;
@@ -23,6 +25,26 @@ export interface PageCaptureOptions {
   // normal runs (and every existing caller that doesn't pass these) are unaffected.
   settlePollIntervalMs?: number;
   settleStableSamples?: number;
+  // CD-N04: deterministic interaction execution from trace candidates. Defaults to enabled — a
+  // page whose passive trace has zero eligible candidates never touches the interaction/scroll
+  // machinery at all (see the length/signal guards in interaction-delta-profiler.ts and below),
+  // so existing minimal test doubles that don't implement the fuller Playwright Page API are
+  // unaffected unless they actually produce candidates or lazy-load signals.
+  interactionExecutionEnabled?: boolean;
+  interactionActionTimeoutMs?: number;
+  interactionDeltaSettleMs?: number;
+  interactionDeltaSettlePollIntervalMs?: number;
+  interactionMaxCandidates?: number;
+  lazyScrollEnabled?: boolean;
+  lazyScrollMaxRounds?: number;
+  lazyScrollStableRoundsRequired?: number;
+  lazyScrollRoundBudgetMs?: number;
+  // CD-N07: bounds the WHOLE interaction-expansion pass (all executed candidates plus the
+  // lazy-scroll pass) for this page — separate from, and generous relative to, the per-action/
+  // per-scroll-round budgets above, so a page whose candidates individually respect their own
+  // bounds but collectively never stop expanding (e.g. an unbounded chain of newly-revealed
+  // candidates) still can't hold up the page beyond this ceiling.
+  interactionExpansionTimeoutMs?: number;
 }
 
 // FIX-04: the only `document.readyState` value that unambiguously means "document has not
@@ -202,6 +224,66 @@ export async function capturePage(options: PageCaptureOptions): Promise<VisitedP
     const title = await options.page.title().catch(() => undefined);
     const html = await options.page.content();
     const passive = await collectPassiveInteractivity(options.page);
+
+    // CD-N04: deterministic interaction execution against the live page, seeded from the passive
+    // trace candidates above. Runs only when there is actually something to do — a page with no
+    // detected interactive elements and no lazy-load signal never invokes this machinery.
+    let interactionExecutions: PagePassiveTrace['interactionExecutions'];
+    let lazyScrollPass: PagePassiveTrace['lazyScrollPass'];
+    const interactionExecutionEnabled = options.interactionExecutionEnabled ?? true;
+    const lazyScrollEnabled = options.lazyScrollEnabled ?? true;
+    const runLazyScroll =
+      lazyScrollEnabled && (passive.runtimeSignals.lazyImageCount > 0 || passive.runtimeSignals.lazySourceCount > 0);
+    const runInteractions = interactionExecutionEnabled && passive.interactiveElements.length > 0;
+
+    // CD-N07: the whole interaction-expansion pass (executed candidates + lazy-scroll pass) is
+    // bounded as one unit — a lazy-load surface, or a chain of candidates, that never stabilizes
+    // must still stop at this ceiling rather than holding up the page indefinitely, even though
+    // each individual action/scroll round already respects its own tighter budget.
+    if (runInteractions || runLazyScroll) {
+      const interactionExpansionTimeoutMs = options.interactionExpansionTimeoutMs ?? DEFAULT_RUNTIME_BUDGETS.interactionExpansionTimeoutMs;
+      try {
+        await withTimeout(
+          (async () => {
+            if (runInteractions) {
+              interactionExecutions = await executeInteractionCandidates(options.page, passive.interactiveElements, {
+                actionTimeoutMs: options.interactionActionTimeoutMs,
+                deltaSettleMs: options.interactionDeltaSettleMs,
+                deltaSettlePollIntervalMs: options.interactionDeltaSettlePollIntervalMs,
+                maxCandidates: options.interactionMaxCandidates,
+              }).catch((error) => {
+                // A profiler-level failure (as opposed to one candidate's own recorded outcome)
+                // must never fail the whole page capture.
+                passive.notes.push(
+                  `interaction_execution_failed: ${error instanceof Error ? error.message : String(error)}`,
+                );
+                return undefined;
+              });
+            }
+            if (runLazyScroll) {
+              lazyScrollPass = await controlledScrollPass(options.page, {
+                maxRounds: options.lazyScrollMaxRounds,
+                stableRoundsRequired: options.lazyScrollStableRoundsRequired,
+                roundBudgetMs: options.lazyScrollRoundBudgetMs,
+              }).catch((error) => {
+                passive.notes.push(`lazy_scroll_pass_failed: ${error instanceof Error ? error.message : String(error)}`);
+                return undefined;
+              });
+            }
+          })(),
+          interactionExpansionTimeoutMs,
+          `Interaction-expansion pass exceeded ${interactionExpansionTimeoutMs}ms deadline`,
+        );
+      } catch (error) {
+        // Only a bounded-deadline timeout is downgraded to a best-effort note here — evidence
+        // already captured (any interactionExecutions/lazyScrollPass results resolved before the
+        // deadline fired) is preserved as-is; whatever hadn't finished yet is simply abandoned,
+        // never awaited to completion. Any non-timeout exception keeps propagating unchanged.
+        if (!(error instanceof TimeoutError)) throw error;
+        passive.notes.push(`interaction_expansion_timeout: ${error.message}`);
+      }
+    }
+
     const basename = stablePageBasename(options.pageIndex, finalUrl || options.requestedUrl);
     const htmlPath = path.join(options.pagesDir, `${basename}.html`);
     const tracePath = path.join(options.pagesDir, `${basename}.trace.json`);
@@ -217,8 +299,18 @@ export async function capturePage(options: PageCaptureOptions): Promise<VisitedP
       automaticDialogs: dialogs,
       network: { ...options.networkObserver.counters },
       runtimeSignals: passive.runtimeSignals,
+      interactionExecutions,
+      lazyScrollPass,
       notes: [
-        'Passive-only profile: no element click, hover, keyboard activation, form fill, selection, pagination, load-more, or controlled scroll was executed.',
+        // CD-N04: the passive trace above is a candidate seed, never proof by itself that hidden
+        // content was collected. `interactionExecutions` (when present) records exactly which of
+        // those candidates were actually promoted to a stable action class and executed, with a
+        // terminal per-candidate outcome — a bare candidate that was never executed keeps no
+        // outcome label at all.
+        interactionExecutions && interactionExecutions.length > 0
+          ? `interaction_execution: ${interactionExecutions.length} candidate(s) executed against the live page under the ` +
+            'bounded deterministic protocol (trial action, one real action, delta-settle, before/after delta, restore-to-baseline).'
+          : 'interaction_execution: no eligible candidate was promoted to an allowed action class on this page.',
         ...(settleStatus === 'timeout'
           ? [
               `page_settle_timeout: page did not settle within ${options.settleMs}ms (url=${settleResult.sample.url}, ` +
