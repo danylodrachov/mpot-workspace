@@ -1,7 +1,7 @@
 ---
 name: url-map
-description: Build a casino-site URL map sitemap-first, supplement it from one Playwright entry-page inspection, then delegate business relevance filtering to the url-map-classifier subagent.
-allowed-tools: Bash, Read, Glob, Agent
+description: Build a casino-site URL map sitemap-first, supplement it from one Playwright entry-page inspection, and produce a fail-closed accepted-URL inventory. Purely deterministic — no classifier subagent.
+allowed-tools: Bash, Read
 ---
 
 Build the URL map for the site supplied in `$ARGUMENTS`.
@@ -9,41 +9,29 @@ Build the URL map for the site supplied in `$ARGUMENTS`.
 ## Procedure
 
 1. Extract the target site URL and any explicit flags from `$ARGUMENTS`.
-2. Run the deterministic collector from the repository root:
+2. Run the deterministic discovery entrypoint from the repository root:
 
 ```bash
-node --experimental-strip-types src/research/url-map/cli.ts --url <URL> <flags>
+node --experimental-strip-types bin/run-url-map-discovery.ts --url <URL> --out <RUN_DIR> <flags>
 ```
 
-Default discovery semantics are `--recursive-mode fallback`:
+Flags:
 
-- fetch `robots.txt` first;
-- recursively fetch declared/fallback sitemaps without browser navigation;
-- inspect only the entry page with Playwright to supplement sitemap coverage with DOM/SPA/network candidates;
-- run recursive browser traversal only if zero page URLs were discovered from sitemaps.
+- `--out <dir>` — output directory (default `./artifacts/url-map`);
+- `--cdp <endpoint>` — attach to an existing Chrome via CDP instead of launching a new browser;
+- `--allow-host <host>` — repeatable; explicitly approve an additional same-brand host beyond the entry URL's own host.
 
-Use `--recursive-mode never` when the user explicitly wants no browser crawl fallback.
-Use `--recursive-mode always` only when the user explicitly asks for exhaustive recursive browser traversal.
+Discovery is sitemap-first with one entry-page Playwright inspection. There is no recursive browser-crawl fallback and no LLM classification step: every candidate URL is resolved deterministically to `accepted`, `rejected`, or `tbd` by the URL rules in `src/research/url-map-discovery/policy.ts`.
 
-Use `--manual-login` only when requested or when the task explicitly requires authenticated entry-page reconnaissance. This flag implies headed mode and pauses for operator-controlled login.
+3. Confirm these deterministic artifacts exist in `<RUN_DIR>`:
+   - `raw-url-candidates.json`
+   - `url-source-coverage.json`
+   - `accepted-url-inventory.json`
+   - `deterministic-rejected-urls.json`
+   - `tbd-url-inventory.json`
+   - `url-clean-decisions.jsonl`
+   - `url-map-discovery-summary.json`
+4. Read `url-map-discovery-summary.json`. Report the run directory, `rawObservationCount`, `acceptedCount`, `rejectedCount`, `tbdCount`, and any `sourceCoverage` entries with `status: "error"`.
+5. `accepted-url-inventory.json` is the final research page map. Do not visit, enqueue, or otherwise act on `tbd` or rejected URLs — they are logged only, for later manual/rule review.
 
-`--max-pages` caps only recursive fallback pages. It has no effect when recursive traversal does not run. `--max-pages 0` means no count limit if fallback is triggered.
-
-3. Read the command's final `RUN_DIR=...` line. Confirm these deterministic artifacts exist:
-   - `raw-url-candidates.jsonl`
-   - `technical-rejected-urls.jsonl`
-   - `technical-url-candidates.md`
-   - `url-map-run.json`
-4. Read `url-map-run.json`. Confirm and preserve:
-   - `sitemapUrlObservationCount`;
-   - `usableSitemapUrlCount`;
-   - `recursiveFallbackTriggered`;
-   - `recursiveFallbackReason` when present;
-   - `recursivePagesAttempted`.
-5. Delegate exactly one task to the `url-map-classifier` subagent:
-   - `candidate_path = <RUN_DIR>/technical-url-candidates.md`
-   - `output_path = <RUN_DIR>/clean-url-map.md`
-6. Do not manually reclassify URLs in the parent agent.
-7. Verify `clean-url-map.md` exists. Report the run directory, usable sitemap URL count, unique technical candidate count, technical reject count, whether recursive fallback ran, and recursive pages attempted.
-
-The deterministic collector owns discovery and technical garbage removal. The subagent owns only business relevance classification.
+The deterministic collector owns discovery, technical-source separation, and URL-rule classification end to end. There is no downstream business-relevance classification stage.

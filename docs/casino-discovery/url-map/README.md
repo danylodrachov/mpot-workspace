@@ -2,91 +2,41 @@
 
 ## Boundary
 
-This module has two owners:
+Fully deterministic. There is no LLM classification stage: every discovered URL is resolved to `accepted`, `rejected`, or `tbd` by the URL rules in `src/research/url-map-discovery/policy.ts`. `accepted-url-inventory.json` is the final research page map consumed by later stages (page crawl, snapshot collection, interactivity profiling, post-run review). `tbd` and `rejected` URLs are logged for review only and must never be visited or enqueued.
 
-1. Playwright/TypeScript: broad URL discovery + deterministic technical cleanup only.
-2. Claude Code `url-map-classifier`: business relevance classification + `clean-url-map.md`.
+Only deterministic URL-rule `accepted` decisions can become page-navigation targets. There is no recursive-fallback navigation of arbitrary discovered candidates.
 
-The deterministic filter MUST NOT reject a URL because it looks like a lobby, homepage, cashier route, promotion, sports page, game category, terms page, VIP page, or any other business class. That decision belongs to the classifier.
+## Discovery order
 
-Static JS/font/CSS/image/media URLs are removed from the LLM candidate list only after entry-page browser/network responses have had a chance to contribute URL tokens.
-
-## Default discovery order
-
-The module is sitemap-first. It does not recursively browse every sitemap URL by default.
-
-1. Fetch `/robots.txt` with Playwright's request context.
-2. Read every `Sitemap:` declaration.
-3. Recursively fetch sitemap indexes and terminal sitemap documents.
-4. Probe configured fallback sitemap paths (`/sitemap.xml`, `/sitemap_index.xml`, etc.).
-5. Add sitemap page URLs to the candidate set without visiting them.
-6. Open the entry page once with Playwright.
-7. Passively supplement the candidate set from the entry page:
-   - DOM links and metadata across frames/open Shadow DOM;
+1. Fetch `/robots.txt` and read every `Sitemap:` declaration.
+2. Recursively fetch sitemap indexes and terminal sitemap documents (source files only, never treated as document candidates themselves).
+3. Probe common fallback sitemap paths.
+4. Add sitemap page URLs to the candidate set without visiting them.
+5. Open the entry page once with Playwright and passively supplement the candidate set from:
+   - DOM links/attributes and document metadata across frames/open Shadow DOM;
    - forms/frames/embed URLs;
-   - `data-*` and inline-event route values;
-   - inline JS/bootstrap route strings;
-   - network request/response URLs;
-   - same-scope URL tokens from textual JS/JSON/XML response bodies;
+   - inline script/config URL tokens (deterministic scan, no runtime `eval`);
+   - network request URLs (request-time only; response bodies are never read for this);
    - Performance API resources;
-   - History API / SPA route instrumentation;
-   - localStorage/sessionStorage route strings;
-   - manifest URL.
-8. Run deterministic technical filtering.
-9. Pass the canonical technical candidates to the LLM classifier.
-
-## Recursive fallback
-
-Default `--recursive-mode fallback` starts recursive same-scope Playwright traversal only when sitemap discovery produced **zero page URLs**.
-
-Modes:
-
-- `fallback` — default; crawl only if no sitemap page URLs exist.
-- `never` — never recursively crawl; robots/sitemaps + one entry-page inspection only.
-- `always` — explicitly force recursive browser traversal after sitemap + entry-page discovery.
-
-`--max-pages` applies only when recursive traversal is active. `--max-pages 0` means no page-count cap.
-
-A sitemap can be incomplete, so the entry-page browser reconnaissance supplements it. Recursive browsing remains a fallback rather than the normal URL-map mechanism.
+   - History API / SPA route instrumentation.
+6. Explicitly re-fetch same-origin JS/JSON/config technical sources via `browserContext.request` and scan them for URL tokens, bounded by a source count/time budget. Image/font/media/CSS noise is excluded before this budget is consumed.
+7. Classify every candidate through the URL rules into `accepted` / `rejected` / `tbd`. Every configured source family gets exactly one terminal coverage status (`complete` / `absent` / `blocked` / `unsupported` / `error`).
 
 ## Run
 
-Default:
-
 ```bash
-node --experimental-strip-types src/research/url-map/cli.ts \
+node --experimental-strip-types bin/run-url-map-discovery.ts \
   --url https://example.com \
-  --headed
+  --out ./artifacts/url-map/example
 ```
 
-Guarantee no recursive crawl:
+Attach to an already-running Chrome instead of launching one:
 
 ```bash
-node --experimental-strip-types src/research/url-map/cli.ts \
-  --url https://example.com \
-  --recursive-mode never \
-  --headed
+--cdp http://127.0.0.1:9222
 ```
 
-Force recursive crawl:
-
-```bash
-node --experimental-strip-types src/research/url-map/cli.ts \
-  --url https://example.com \
-  --recursive-mode always \
-  --max-pages 5000 \
-  --headed
-```
-
-Manual authenticated entry-page reconnaissance:
-
-```bash
-node --experimental-strip-types src/research/url-map/cli.ts \
-  --url https://example.com \
-  --manual-login
-```
-
-Optional scope expansion for an explicitly approved brand host:
+Approve an additional same-brand host explicitly:
 
 ```bash
 --allow-host mirror.example.com
@@ -94,46 +44,28 @@ Optional scope expansion for an explicitly approved brand host:
 
 ## Deterministic outputs
 
-Each run writes:
+Each run writes to `--out`:
 
-- `raw-url-candidates.jsonl` — every raw URL observation with provenance;
-- `technical-rejected-urls.jsonl` — static assets, non-HTTP, invalid and out-of-scope URLs;
-- `technical-url-candidates.md` — canonical in-scope candidates passed to the LLM;
-- `url-map-run.json` — counts, source coverage/errors, sitemap coverage and fallback state.
-
-Important `url-map-run.json` fields:
-
-- `sitemapUrlObservationCount`;
-- `usableSitemapUrlCount`;
-- `recursiveFallbackTriggered`;
-- `recursiveFallbackReason`;
-- `recursivePagesAttempted`;
-- `sourceFamilyObservationCounts`.
-
-The classifier then writes:
-
-- `clean-url-map.md` — research-relevant browser page map.
+- `raw-url-candidates.json` — every raw URL observation with provenance;
+- `url-source-coverage.json` — per-source-family terminal status;
+- `accepted-url-inventory.json` — the final research page map (canonical URL, rule id, provenance);
+- `deterministic-rejected-urls.json` — rejected candidates with the rejecting rule;
+- `tbd-url-inventory.json` — candidates the URL rules could not resolve; never visited automatically;
+- `url-clean-decisions.jsonl` — one decision record per canonical URL;
+- `url-map-discovery-summary.json` — counts, source coverage, and run metadata.
 
 ## Claude Code
 
-Project subagent:
-
-`.claude/agents/url-map-classifier.md`
-
-Project skill:
-
-`.claude/skills/url-map/SKILL.md`
+Project skill: `.claude/skills/url-map/SKILL.md`
 
 Invoke from Claude Code:
 
 ```text
-/url-map https://example.com --headed
+/url-map https://example.com
 ```
 
 ## Tests
 
 ```bash
-node --test --experimental-strip-types \
-  src/research/url-map/technical-filter.test.ts \
-  src/research/url-map/discovery-policy.test.ts
+npm run test:research
 ```
