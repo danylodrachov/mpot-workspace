@@ -2,6 +2,11 @@ import { mkdir, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { gunzipSync } from 'node:zlib';
 
+import {
+  isSitemapAccessGateResponse,
+  type SitemapBrowserFetcher,
+} from './sitemap-browser-fallback.ts';
+
 export interface ApiResponseLike {
   status(): number;
   headers(): Record<string, string>;
@@ -52,6 +57,9 @@ export interface SitemapFetchAttempt {
   content_type: string | null;
   final_url: string | null;
   reason: string | null;
+  fetch_method?: 'api_request' | 'browser_navigation' | 'seed_document';
+  fallback_from_http_status?: number | null;
+  fallback_error?: string | null;
 }
 
 export interface SitemapFileRecord {
@@ -73,6 +81,9 @@ export interface RobotsResult {
   http_status: number | null;
   sitemap_directives: string[];
   reason: string | null;
+  fetch_method?: 'api_request' | 'browser_navigation';
+  fallback_from_http_status?: number | null;
+  fallback_error?: string | null;
 }
 
 export interface SitemapDiscoverySuccess {
@@ -125,6 +136,7 @@ export interface SitemapDiscoveryOptions {
   maxRedirects?: number;
   maxSitemapFiles?: number;
   maxPageUrls?: number;
+  browserFallback?: SitemapBrowserFetcher;
 }
 
 const DEFAULT_MAX_SITEMAP_FILES = 5_000;
@@ -339,25 +351,75 @@ function headerValue(headers: Record<string, string>, name: string): string | nu
   return null;
 }
 
+type FetchedDocument = {
+  status: number;
+  contentType: string | null;
+  body: Buffer;
+  finalUrl: string;
+  headers: Record<string, string>;
+  accessBlocked: boolean;
+  fetchMethod: 'api_request' | 'browser_navigation' | 'seed_document';
+  fallbackFromHttpStatus: number | null;
+  fallbackError: string | null;
+};
+
 async function fetchDocument(
   request: ApiRequestLike,
   url: string,
   timeoutMs: number,
   maxRedirects: number,
-): Promise<{ status: number; contentType: string | null; body: Buffer; finalUrl: string; headers: Record<string, string> }> {
+  browserFallback?: SitemapBrowserFetcher,
+): Promise<FetchedDocument> {
   const response = await request.get(url, {
     timeout: timeoutMs,
     failOnStatusCode: false,
     maxRedirects,
   });
   const headers = response.headers();
-  return {
+  const body = maybeGunzip(await response.body());
+  const apiDocument = {
     status: response.status(),
-    contentType: headerValue(headers, 'content-type'),
-    body: maybeGunzip(await response.body()),
-    finalUrl: response.url?.() || url,
     headers,
+    body,
+    finalUrl: response.url?.() || url,
   };
+  const apiBlocked = isSitemapAccessGateResponse(apiDocument);
+  if (!browserFallback || !apiBlocked) {
+    return {
+      ...apiDocument,
+      contentType: headerValue(headers, 'content-type'),
+      accessBlocked: apiBlocked,
+      fetchMethod: 'api_request',
+      fallbackFromHttpStatus: null,
+      fallbackError: null,
+    };
+  }
+
+  try {
+    const browserDocument = await browserFallback(url, { timeoutMs });
+    const browserBody = maybeGunzip(browserDocument.body);
+    const browserNormalized = { ...browserDocument, body: browserBody };
+    return {
+      status: browserDocument.status,
+      contentType: headerValue(browserDocument.headers, 'content-type'),
+      body: browserBody,
+      finalUrl: browserDocument.finalUrl,
+      headers: browserDocument.headers,
+      accessBlocked: isSitemapAccessGateResponse(browserNormalized),
+      fetchMethod: 'browser_navigation',
+      fallbackFromHttpStatus: apiDocument.status,
+      fallbackError: null,
+    };
+  } catch (error) {
+    return {
+      ...apiDocument,
+      contentType: headerValue(headers, 'content-type'),
+      accessBlocked: apiBlocked,
+      fetchMethod: 'api_request',
+      fallbackFromHttpStatus: null,
+      fallbackError: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 async function fetchRobotsForOrigin(
@@ -365,10 +427,24 @@ async function fetchRobotsForOrigin(
   origin: string,
   timeoutMs: number,
   maxRedirects: number,
+  browserFallback?: SitemapBrowserFetcher,
 ): Promise<RobotsResult> {
   const url = new URL('/robots.txt', origin).toString();
   try {
-    const response = await fetchDocument(request, url, timeoutMs, maxRedirects);
+    const response = await fetchDocument(request, url, timeoutMs, maxRedirects, browserFallback);
+    if (response.accessBlocked) {
+      return {
+        url,
+        origin,
+        status: 'http_error',
+        http_status: response.status,
+        sitemap_directives: [],
+        reason: 'SITEMAP_ACCESS_BLOCKED: robots.txt remained behind an access gate after deterministic acquisition attempts',
+        fetch_method: response.fetchMethod === 'seed_document' ? 'api_request' : response.fetchMethod,
+        fallback_from_http_status: response.fallbackFromHttpStatus,
+        fallback_error: response.fallbackError,
+      };
+    }
     if (response.status < 200 || response.status >= 400) {
       return {
         url,
@@ -377,6 +453,9 @@ async function fetchRobotsForOrigin(
         http_status: response.status,
         sitemap_directives: [],
         reason: `robots.txt returned HTTP ${response.status}`,
+        fetch_method: response.fetchMethod === 'seed_document' ? 'api_request' : response.fetchMethod,
+        fallback_from_http_status: response.fallbackFromHttpStatus,
+        fallback_error: response.fallbackError,
       };
     }
     const directives = parseRobotsSitemaps(response.body.toString('utf8'), response.finalUrl);
@@ -387,6 +466,9 @@ async function fetchRobotsForOrigin(
       http_status: response.status,
       sitemap_directives: directives,
       reason: directives.length ? null : 'robots.txt contains no valid Sitemap directives',
+      fetch_method: response.fetchMethod === 'seed_document' ? 'api_request' : response.fetchMethod,
+      fallback_from_http_status: response.fallbackFromHttpStatus,
+      fallback_error: response.fallbackError,
     };
   } catch (error) {
     return {
@@ -424,6 +506,7 @@ async function walkSitemaps(
   roots: QueueItem[],
   attempts: SitemapFetchAttempt[],
   options: Required<Pick<SitemapDiscoveryOptions, 'requestTimeoutMs' | 'maxRedirects' | 'maxSitemapFiles' | 'maxPageUrls'>>,
+  browserFallback?: SitemapBrowserFetcher,
 ): Promise<{ files: SitemapFileRecord[]; pageUrls: string[] }> {
   const queue = [...roots];
   const queued = new Set(queue.map(item => item.url));
@@ -447,8 +530,30 @@ async function walkSitemaps(
             contentType: item.preloaded.contentType,
             body: maybeGunzip(item.preloaded.body),
             finalUrl: item.preloaded.finalUrl,
+            headers: {},
+            accessBlocked: false,
+            fetchMethod: 'seed_document' as const,
+            fallbackFromHttpStatus: null,
+            fallbackError: null,
           }
-        : await fetchDocument(request, item.url, options.requestTimeoutMs, options.maxRedirects);
+        : await fetchDocument(request, item.url, options.requestTimeoutMs, options.maxRedirects, browserFallback);
+
+      if (response.accessBlocked) {
+        attempts.push({
+          url: item.url,
+          sources: item.sources,
+          parent_url: item.parentUrl,
+          status: 'http_error',
+          http_status: response.status,
+          content_type: response.contentType,
+          final_url: response.finalUrl,
+          reason: 'SITEMAP_ACCESS_BLOCKED: sitemap remained behind an access gate after deterministic acquisition attempts',
+          fetch_method: response.fetchMethod,
+          fallback_from_http_status: response.fallbackFromHttpStatus,
+          fallback_error: response.fallbackError,
+        });
+        continue;
+      }
 
       if (response.status < 200 || response.status >= 400) {
         attempts.push({
@@ -460,6 +565,9 @@ async function walkSitemaps(
           content_type: response.contentType,
           final_url: response.finalUrl,
           reason: `HTTP ${response.status}`,
+          fetch_method: response.fetchMethod,
+          fallback_from_http_status: response.fallbackFromHttpStatus,
+          fallback_error: response.fallbackError,
         });
         continue;
       }
@@ -475,6 +583,9 @@ async function walkSitemaps(
           content_type: response.contentType,
           final_url: response.finalUrl,
           reason: 'Response is not a supported sitemap document (sitemapindex, urlset, RSS, Atom, or plain-text sitemap).',
+          fetch_method: response.fetchMethod,
+          fallback_from_http_status: response.fallbackFromHttpStatus,
+          fallback_error: response.fallbackError,
         });
         continue;
       }
@@ -519,6 +630,9 @@ async function walkSitemaps(
         content_type: response.contentType,
         final_url: response.finalUrl,
         reason: null,
+        fetch_method: response.fetchMethod,
+        fallback_from_http_status: response.fallbackFromHttpStatus,
+        fallback_error: response.fallbackError,
       });
     } catch (error) {
       if (error instanceof Error && /(?:SITEMAP_FILE|PAGE_URL)_LIMIT_EXCEEDED/.test(error.message)) throw error;
@@ -592,7 +706,7 @@ export async function discoverSitemaps(
 
   const robots: RobotsResult[] = [];
   for (const origin of origins) {
-    const result = await fetchRobotsForOrigin(request, origin, requestTimeoutMs, maxRedirects);
+    const result = await fetchRobotsForOrigin(request, origin, requestTimeoutMs, maxRedirects, options.browserFallback);
     robots.push(result);
     for (const url of result.sitemap_directives) addRootCandidate(rootCandidates, url, 'robots');
   }
@@ -629,7 +743,7 @@ export async function discoverSitemaps(
     maxRedirects,
     maxSitemapFiles,
     maxPageUrls,
-  });
+  }, options.browserFallback);
 
   if (walked.files.length) {
     const successfulRootUrls = new Set(

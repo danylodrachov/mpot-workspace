@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
+import { createBrowserSitemapFetcher } from '../sitemap-browser-fallback.ts';
 import {
   discoverSitemaps,
   looksLikeSitemapReference,
@@ -193,12 +194,31 @@ function dedupeRawCandidates(candidates: readonly RawUrlCandidate[]): RawUrlCand
   return out;
 }
 
+export function buildConfiguredFallbackSitemapUrls(
+  entryUrl: string,
+  finalEntryUrl: string | null,
+  fallbackPaths: readonly string[],
+): string[] {
+  const bases = [entryUrl, finalEntryUrl].filter((value): value is string => Boolean(value));
+  const urls = new Set<string>();
+  for (const base of bases) {
+    for (const fallbackPath of fallbackPaths) {
+      try {
+        urls.add(new URL(fallbackPath, base).toString());
+      } catch {
+        // Invalid configured fallback is ignored exactly like other malformed URL candidates.
+      }
+    }
+  }
+  return [...urls];
+}
+
 function makeSitemapSeed(
   entryUrl: string,
   seed: SeedDiscoveryResult,
   fallbackPaths: readonly string[],
 ): SeedObservation {
-  const fallbackUrls = fallbackPaths.map(path => new URL(path, entryUrl).toString());
+  const fallbackUrls = buildConfiguredFallbackSitemapUrls(entryUrl, seed.finalEntryUrl || entryUrl, fallbackPaths);
   const rendered = new Set<string>();
   const network = new Set<string>();
   for (const candidate of seed.rawCandidates) {
@@ -268,8 +288,13 @@ function sourceCoverageStatusForSitemaps(
 ): { status: UrlSourceCoverageStatus; errorCodes: string[]; errorCount: number } {
   const attempts = result.attempts ?? [];
   const blocked =
-    attempts.some(item => item.status === 'http_error' && [401, 403, 429].includes(item.http_status ?? 0)) ||
-    result.robots.some(item => item.status === 'http_error' && [401, 403, 429].includes(item.http_status ?? 0));
+    attempts.some(item =>
+      (item.status === 'http_error' && [401, 403, 429].includes(item.http_status ?? 0)) ||
+      item.reason?.startsWith('SITEMAP_ACCESS_BLOCKED:'),
+    ) || result.robots.some(item =>
+      (item.status === 'http_error' && [401, 403, 429].includes(item.http_status ?? 0)) ||
+      item.reason?.startsWith('SITEMAP_ACCESS_BLOCKED:'),
+    );
   const errors =
     attempts.filter(item => item.status === 'fetch_error').length +
     result.robots.filter(item => item.status === 'fetch_error').length;
@@ -452,6 +477,7 @@ export async function discoverFullUrlMap(
     new URL(entryUrl).hostname,
     ...(options.allowedHosts ?? []),
     ...seedHostnames,
+    ...successfulSeeds.flatMap(result => result.allowedHosts),
   ].map(host => host.toLowerCase()))];
   const seed = mergeSeedResults(entryUrl, successfulSeeds, mergedAllowedHosts);
 
@@ -462,6 +488,7 @@ export async function discoverFullUrlMap(
     maxRedirects: options.sitemapMaxRedirects,
     maxSitemapFiles: options.sitemapMaxFiles,
     maxPageUrls: options.sitemapMaxPageUrls,
+    browserFallback: createBrowserSitemapFetcher(page),
   });
 
   const rawCandidates = dedupeRawCandidates([

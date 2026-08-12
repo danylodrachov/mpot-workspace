@@ -308,6 +308,12 @@ export async function discoverFromSeedWithoutCrawl(
       throw new SeedHttpStatusError(entryUrl, finalEntryUrl, httpStatus);
     }
 
+    // A browser-confirmed redirect target is part of the actual seed document scope.
+    // Add it only after access-gate/5xx checks so challenge/error destinations do not
+    // silently expand the discovery host boundary.
+    try {
+      allowedHosts.add(new URL(finalEntryUrl).hostname.toLowerCase());
+    } catch {}
     const pageSignals = await withStableDocumentRead(page, () => page.evaluate(() => {
       const attrs: Array<{ value: string; label: string }> = [];
       const metadata: Array<{ value: string; label: string }> = [];
