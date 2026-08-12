@@ -4,6 +4,7 @@ import path from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stderr as output } from 'node:process';
 
+import { resolveBrowserLaunchHeadless } from '../src/research/url-map/browser-launch-policy.ts';
 import { discoverFullUrlMap } from '../src/research/url-map/full-discovery.ts';
 import { writeFullUrlMapDiscoveryArtifacts } from '../src/research/url-map/full-io.ts';
 
@@ -65,16 +66,21 @@ async function main(): Promise<void> {
   const entryUrl = arg('--url');
   if (!entryUrl) {
     throw new Error(
-      'Usage: run-url-map-discovery.ts --url https://casino.example/ [--casino "Casino Name"] [--out path] [--allow-host host] [--seed-url url] [--seed-allow-host-roots] [--manual-bootstrap] [--headed] [--cdp http://127.0.0.1:9222]',
+      'Usage: run-url-map-discovery.ts --url https://casino.example/ [--casino "Casino Name"] [--out path] [--allow-host host] [--seed-url url] [--seed-allow-host-roots] [--manual-bootstrap] [--headless] [--headed] [--cdp http://127.0.0.1:9222]',
     );
   }
 
-  const outputRoot = path.resolve(arg('--out') ?? arg('--out-root') ?? 'data/casino-partner-researches');
+  const outputRoot = path.resolve(arg('--out') ?? arg('--out-root') ?? 'data/temp');
   const casinoName = arg('--casino');
   const allowedHosts = args('--allow-host');
   const explicitSeedUrls = args('--seed-url');
   const cdp = arg('--cdp');
   const wantsManualBootstrap = has('--manual-bootstrap');
+  const headless = resolveBrowserLaunchHeadless({
+    headlessRequested: has('--headless'),
+    headedRequested: has('--headed'),
+    manualBootstrap: wantsManualBootstrap,
+  });
 
   // Host repository supplies Playwright; this patch intentionally does not pin/change its version.
   // @ts-ignore runtime dependency is supplied by the host repository.
@@ -89,8 +95,8 @@ async function main(): Promise<void> {
     browser = await chromium.connectOverCDP(cdp);
     context = browser.contexts()[0] ?? await browser.newContext();
   } else {
-    // Manual bootstrap must be visible even if --headed was omitted.
-    browser = await chromium.launch({ headless: wantsManualBootstrap ? false : !has('--headed') });
+    // Discovery is headed by default. Headless Chromium is an explicit opt-in via --headless.
+    browser = await chromium.launch({ headless });
     context = await browser.newContext();
     ownsBrowser = true;
   }
