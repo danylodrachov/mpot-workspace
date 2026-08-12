@@ -37,9 +37,9 @@ export async function collectStableDomNavigationCandidates(
   baseUrl: string,
   options: StableDomNavigationOptions = {},
 ): Promise<RawUrlCandidate[]> {
-  const maxWaitMs = Math.max(0, options.maxWaitMs ?? 4_000);
+  const maxWaitMs = Math.max(0, options.maxWaitMs ?? 12_000);
   const sampleIntervalMs = Math.max(50, options.sampleIntervalMs ?? 250);
-  const minObservationMs = Math.min(maxWaitMs, Math.max(0, options.minObservationMs ?? 1_000));
+  const minObservationMs = Math.min(maxWaitMs, Math.max(0, options.minObservationMs ?? 2_000));
   const stableSamples = Math.max(1, options.stableSamples ?? 2);
   const started = Date.now();
   const merged = new Map<string, DomNavigationObservation>();
