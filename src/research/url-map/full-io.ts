@@ -58,11 +58,11 @@ export function resolveFullUrlMapRunPaths(
     runId: result.runId,
     runDate,
     runDir,
-    rawCandidatesPath: path.join(runDir, 'raw-url-candidates.json'),
-    sourceCoveragePath: path.join(runDir, 'url-source-coverage.json'),
-    urlMapPath: path.join(runDir, 'url-map.json'),
-    sitemapPath: path.join(runDir, 'sitemap-discovery.json'),
-    summaryPath: path.join(runDir, 'url-map-discovery-summary.json'),
+    rawCandidatesPath: path.join(runDir, 'source-url-list.json'),
+    sourceCoveragePath: path.join(runDir, 'url-source-coverage-log.json'),
+    urlMapPath: path.join(runDir, 'url-list.json'),
+    sitemapPath: path.join(runDir, 'sitemap-discovery-log.json'),
+    summaryPath: path.join(runDir, 'url-map-discovery-report.json'),
   };
 }
 

@@ -696,7 +696,7 @@ export async function writeSitemapDiscoveryJson(
 ): Promise<{ runDir: string; jsonPath: string }> {
   const host = safeHostFolder(new URL(result.origin).hostname);
   const runDir = path.join(path.resolve(outputRoot), host, runStamp());
-  const jsonPath = path.join(runDir, 'sitemap-discovery.json');
+  const jsonPath = path.join(runDir, 'sitemap-discovery-log.json');
   await mkdir(runDir, { recursive: true });
   const tempPath = `${jsonPath}.tmp-${process.pid}`;
   await writeFile(tempPath, `${JSON.stringify(result, null, 2)}\n`, 'utf8');
