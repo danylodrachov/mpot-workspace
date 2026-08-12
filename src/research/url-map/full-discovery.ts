@@ -9,6 +9,7 @@ import {
 import {
   discoverFromSeedWithoutCrawl,
   SeedAccessBlockedError,
+  SeedHttpStatusError,
   type SeedDiscoveryOptions,
 } from './seed-discovery.ts';
 import type {
@@ -320,10 +321,10 @@ function buildCoverage(
     resolvedCount: seedAttempts.filter(item => item.status === 'complete').length,
     errorCount: blockedSeeds.length + erroredSeeds.length,
     durationMs: discoveryDurationMs,
-    errorCodes: [
+    errorCodes: [...new Set([
       ...(blockedSeeds.length > 0 ? ['SEED_ACCESS_BLOCKED'] : []),
-      ...(erroredSeeds.length > 0 ? ['SEED_DISCOVERY_ERROR'] : []),
-    ],
+      ...erroredSeeds.map(item => item.errorCode ?? 'SEED_DISCOVERY_ERROR'),
+    ])],
   });
 
   for (const { family, extractorId } of SEED_FAMILIES) {
@@ -415,6 +416,20 @@ export async function discoverFullUrlMap(
           errorReason: error.message,
           accessGateKind: error.kind,
           evidence: error.evidence,
+        });
+        continue;
+      }
+      if (error instanceof SeedHttpStatusError) {
+        seedAttempts.push({
+          seedUrl,
+          status: 'error',
+          finalUrl: error.finalUrl,
+          rawCandidateCount: 0,
+          observedTechnicalSourceCount: 0,
+          errorCode: error.code,
+          errorReason: error.message,
+          accessGateKind: null,
+          evidence: [`http_status:${error.httpStatus}`],
         });
         continue;
       }

@@ -22,13 +22,15 @@ export interface SeedDiscoveryOptions {
   maxTechnicalSourceBodyBytes?: number;
 }
 
-export type SeedAccessGateKind = 'cloudflare_challenge';
+export type SeedAccessGateKind = 'cloudflare_challenge' | 'cloudflare_error_page';
 
 export interface SeedAccessGateSignals {
   title?: string | null;
   bodyText?: string | null;
   matchedSelectors?: string[];
   currentUrl?: string | null;
+  httpStatus?: number | null;
+  responseHeaders?: Record<string, string>;
 }
 
 export interface SeedAccessGateMatch {
@@ -53,10 +55,57 @@ export class SeedAccessBlockedError extends Error {
   }
 }
 
+export class SeedHttpStatusError extends Error {
+  readonly code = 'SEED_HTTP_ERROR';
+  readonly seedUrl: string;
+  readonly finalUrl: string;
+  readonly httpStatus: number;
+
+  constructor(seedUrl: string, finalUrl: string, httpStatus: number) {
+    super(`Seed navigation returned HTTP ${httpStatus}: ${seedUrl}`);
+    this.name = 'SeedHttpStatusError';
+    this.seedUrl = seedUrl;
+    this.finalUrl = finalUrl;
+    this.httpStatus = httpStatus;
+  }
+}
+
+export function isRecoverableNavigationRaceError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /execution context was destroyed/i.test(message) && /navigat/i.test(message);
+}
+
+/**
+ * A passive document read may race an in-flight SPA navigation. Only that specific
+ * Playwright failure is retried, and only a bounded number of times; page.goto() is
+ * never repeated and unrelated failures propagate untouched.
+ */
+export async function withStableDocumentRead<T>(
+  page: Pick<PageLike, 'waitForTimeout'>,
+  read: () => Promise<T>,
+  retries = 2,
+  retryDelayMs = 250,
+): Promise<T> {
+  let retriesUsed = 0;
+  for (;;) {
+    try {
+      return await read();
+    } catch (error) {
+      if (!isRecoverableNavigationRaceError(error) || retriesUsed >= retries) throw error;
+      retriesUsed += 1;
+      await page.waitForTimeout(retryDelayMs);
+    }
+  }
+}
+
 export function classifySeedAccessGate(signals: SeedAccessGateSignals): SeedAccessGateMatch | null {
   const title = (signals.title ?? '').trim();
   const body = (signals.bodyText ?? '').trim();
   const currentUrl = signals.currentUrl ?? '';
+  const httpStatus = signals.httpStatus ?? null;
+  const responseHeaders = Object.fromEntries(
+    Object.entries(signals.responseHeaders ?? {}).map(([name, value]) => [name.toLowerCase(), value]),
+  );
   const selectors = signals.matchedSelectors ?? [];
   const evidence: string[] = [];
   let hardSignal = false;
@@ -82,11 +131,37 @@ export function classifySeedAccessGate(signals: SeedAccessGateSignals): SeedAcce
     hardSignal = true;
   }
 
-  return hardSignal ? { kind: 'cloudflare_challenge', evidence: [...new Set(evidence)] } : null;
+  if (hardSignal) return { kind: 'cloudflare_challenge', evidence: [...new Set(evidence)] };
+
+  const cloudflareHeader =
+    /cloudflare/i.test(responseHeaders.server ?? '') || Boolean(responseHeaders['cf-ray']);
+  const cloudflareErrorBody =
+    /cloudflare/i.test(body) &&
+    (
+      /error\s*(?:code\s*)?5(?:20|21|22|23|24|25|26)\b/i.test(body) ||
+      /web server is (?:down|returning an unknown error)/i.test(body) ||
+      /connection timed out/i.test(body) ||
+      /origin is unreachable/i.test(body) ||
+      /a timeout occurred/i.test(body) ||
+      /ssl handshake failed/i.test(body) ||
+      /invalid ssl certificate/i.test(body)
+    );
+  if (httpStatus !== null && httpStatus >= 500 && httpStatus <= 599 && (cloudflareHeader || cloudflareErrorBody)) {
+    evidence.push(`http_status:${httpStatus}`);
+    if (cloudflareHeader) evidence.push('header:Cloudflare');
+    if (cloudflareErrorBody) evidence.push('text:Cloudflare 5xx error page');
+    return { kind: 'cloudflare_error_page', evidence: [...new Set(evidence)] };
+  }
+
+  return null;
 }
 
-async function detectSeedAccessGate(page: PageLike): Promise<SeedAccessGateMatch | null> {
-  const raw = await page.evaluate(() => {
+async function detectSeedAccessGate(
+  page: PageLike,
+  httpStatus: number | null,
+  responseHeaders: Record<string, string>,
+): Promise<SeedAccessGateMatch | null> {
+  const raw = await withStableDocumentRead(page, () => page.evaluate(() => {
     const selectors = [
       '#cf-challenge-running',
       '#challenge-running',
@@ -100,9 +175,11 @@ async function detectSeedAccessGate(page: PageLike): Promise<SeedAccessGateMatch
       matchedSelectors,
       currentUrl: location.href,
     };
-  });
+  }));
 
   const signals = raw && typeof raw === 'object' ? raw as SeedAccessGateSignals : {};
+  signals.httpStatus = httpStatus;
+  signals.responseHeaders = responseHeaders;
   return classifySeedAccessGate(signals);
 }
 
@@ -215,17 +292,23 @@ export async function discoverFromSeedWithoutCrawl(
 
   page.on('request', onRequest);
   try {
-    await page.goto(entryUrl, {
+    const navigationResponse = await page.goto(entryUrl, {
       waitUntil: 'domcontentloaded',
       timeout: options.navigationTimeoutMs ?? 20_000,
     });
     await page.waitForTimeout(options.settleMs ?? 1_200);
 
-    const finalEntryUrl = page.url() || entryUrl;
-    const accessGate = await detectSeedAccessGate(page);
+    let finalEntryUrl = page.url() || entryUrl;
+    const httpStatus = navigationResponse?.status() ?? null;
+    const responseHeaders = navigationResponse?.headers?.() ?? {};
+    const accessGate = await detectSeedAccessGate(page, httpStatus, responseHeaders);
+    finalEntryUrl = page.url() || finalEntryUrl;
     if (accessGate) throw new SeedAccessBlockedError(entryUrl, finalEntryUrl, accessGate);
+    if (httpStatus !== null && httpStatus >= 500 && httpStatus <= 599) {
+      throw new SeedHttpStatusError(entryUrl, finalEntryUrl, httpStatus);
+    }
 
-    const pageSignals = await page.evaluate(() => {
+    const pageSignals = await withStableDocumentRead(page, () => page.evaluate(() => {
       const attrs: Array<{ value: string; label: string }> = [];
       const metadata: Array<{ value: string; label: string }> = [];
       const inlineScripts: string[] = [];
@@ -273,8 +356,9 @@ export async function discoverFromSeedWithoutCrawl(
         ? performance.getEntriesByType('resource').map(entry => entry.name).filter(Boolean)
         : [];
       const historyRoutes = ((globalThis as unknown as { __mpotHistoryRoutes?: string[] }).__mpotHistoryRoutes ?? []).slice();
-      return { attrs, metadata, inlineScripts, performanceUrls, historyRoutes };
-    });
+      return { attrs, metadata, inlineScripts, performanceUrls, historyRoutes, currentUrl: location.href };
+    }));
+    finalEntryUrl = pageSignals.currentUrl || page.url() || finalEntryUrl;
 
     for (const item of pageSignals.attrs) {
       addCandidate(rawCandidates, item.value, finalEntryUrl, 'dom_url_attribute', {

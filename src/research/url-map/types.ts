@@ -54,6 +54,7 @@ export interface RequestLike {
 
 export interface NavigationResponseLike {
   status(): number;
+  headers?(): Record<string, string>;
 }
 
 export interface ApiResponseLike {
