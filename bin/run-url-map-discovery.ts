@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 import path from 'node:path';
+import { createInterface } from 'node:readline/promises';
+import { stdin as input, stderr as output } from 'node:process';
 
 import { discoverFullUrlMap } from '../src/research/url-map/full-discovery.ts';
 import { writeFullUrlMapDiscoveryArtifacts } from '../src/research/url-map/full-io.ts';
@@ -30,18 +32,49 @@ function intArg(name: string): number | undefined {
   return parsed;
 }
 
+function isHttpUrl(value: string): boolean {
+  try {
+    return ['http:', 'https:'].includes(new URL(value).protocol);
+  } catch {
+    return false;
+  }
+}
+
+async function manualBootstrap(page: any, context: any, entryUrl: string): Promise<string[]> {
+  await page.goto(entryUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+
+  output.write(
+    '\nManual bootstrap enabled. Complete login / anti-bot challenge in the opened browser.\n' +
+    'Open any additional authenticated application page that must be used as a finite seed.\n' +
+    'When the browser state is ready, return here and press Enter.\n\n',
+  );
+
+  const rl = createInterface({ input, output });
+  try {
+    await rl.question('Press Enter to freeze browser-page seeds and start discovery... ');
+  } finally {
+    rl.close();
+  }
+
+  return context.pages()
+    .map((candidate: any) => candidate.url())
+    .filter((url: string) => isHttpUrl(url));
+}
+
 async function main(): Promise<void> {
   const entryUrl = arg('--url');
   if (!entryUrl) {
     throw new Error(
-      'Usage: run-url-map-discovery.ts --url https://casino.example/ [--casino "Casino Name"] [--out path] [--allow-host host] [--headed] [--cdp http://127.0.0.1:9222]',
+      'Usage: run-url-map-discovery.ts --url https://casino.example/ [--casino "Casino Name"] [--out path] [--allow-host host] [--seed-url url] [--seed-allow-host-roots] [--manual-bootstrap] [--headed] [--cdp http://127.0.0.1:9222]',
     );
   }
 
   const outputRoot = path.resolve(arg('--out') ?? arg('--out-root') ?? 'data/casino-partner-researches');
   const casinoName = arg('--casino');
   const allowedHosts = args('--allow-host');
+  const explicitSeedUrls = args('--seed-url');
   const cdp = arg('--cdp');
+  const wantsManualBootstrap = has('--manual-bootstrap');
 
   // Host repository supplies Playwright; this patch intentionally does not pin/change its version.
   // @ts-ignore runtime dependency is supplied by the host repository.
@@ -56,7 +89,8 @@ async function main(): Promise<void> {
     browser = await chromium.connectOverCDP(cdp);
     context = browser.contexts()[0] ?? await browser.newContext();
   } else {
-    browser = await chromium.launch({ headless: !has('--headed') });
+    // Manual bootstrap must be visible even if --headed was omitted.
+    browser = await chromium.launch({ headless: wantsManualBootstrap ? false : !has('--headed') });
     context = await browser.newContext();
     ownsBrowser = true;
   }
@@ -66,8 +100,17 @@ async function main(): Promise<void> {
   ownsPage = !existingPage;
 
   try {
+    const browserPageSeeds = wantsManualBootstrap
+      ? await manualBootstrap(page, context, entryUrl)
+      : [];
+
+    // Freeze all seeds before discoverFullUrlMap starts. No scanner result is fed back here.
+    const seedUrls = [...new Set([...explicitSeedUrls, ...browserPageSeeds])];
+
     const result = await discoverFullUrlMap(page, entryUrl, {
       allowedHosts,
+      seedUrls,
+      seedAllowedHostRoots: has('--seed-allow-host-roots'),
       navigationTimeoutMs: intArg('--navigation-timeout-ms'),
       settleMs: intArg('--settle-ms'),
       technicalSourceTimeoutMs: intArg('--technical-source-timeout-ms'),
@@ -85,11 +128,16 @@ async function main(): Promise<void> {
     });
 
     process.stdout.write(`${JSON.stringify({
-      status: 'ok',
+      status: result.summary.discoveryStatus,
       run_id: result.runId,
       casino: written.casinoSlug,
       run_date: written.runDate,
       run_dir: written.runDir,
+      frozen_seeds: result.summary.counts.frozenSeeds,
+      completed_seeds: result.summary.counts.completedSeeds,
+      blocked_seeds: result.summary.counts.blockedSeeds,
+      errored_seeds: result.summary.counts.erroredSeeds,
+      seed_attempts: result.seedAttempts,
       raw_candidates: result.summary.counts.rawCandidates,
       resolved_urls: result.summary.counts.resolvedUrls,
       unresolved_candidates: result.summary.counts.unresolvedCandidates,

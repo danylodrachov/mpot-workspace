@@ -6,7 +6,11 @@ import {
   type SeedObservation,
   type SitemapDiscoveryResult,
 } from '../sitemap-discovery.ts';
-import { discoverFromSeedWithoutCrawl, type SeedDiscoveryOptions } from './seed-discovery.ts';
+import {
+  discoverFromSeedWithoutCrawl,
+  SeedAccessBlockedError,
+  type SeedDiscoveryOptions,
+} from './seed-discovery.ts';
 import type {
   CandidateProvenance,
   PageLike,
@@ -28,18 +32,24 @@ export interface UrlSourceCoverageRecord {
   errorCodes: string[];
 }
 
-/**
- * One resolved/canonical URL in the discovered map.
- *
- * This is intentionally not an allow/reject decision. Any HTTP(S) candidate
- * that can be resolved is retained. `navigationUrl` is currently identical to
- * `canonicalUrl` and exists only to keep downstream consumers explicit about
- * which exact URL string they would navigate to.
- */
 export interface UrlMapEntry {
   canonicalUrl: string;
   navigationUrl: string;
   provenance: CandidateProvenance[];
+}
+
+export type FrozenSeedStatus = 'complete' | 'blocked' | 'error';
+
+export interface FrozenSeedAttempt {
+  seedUrl: string;
+  status: FrozenSeedStatus;
+  finalUrl: string | null;
+  rawCandidateCount: number;
+  observedTechnicalSourceCount: number;
+  errorCode: string | null;
+  errorReason: string | null;
+  accessGateKind: string | null;
+  evidence: string[];
 }
 
 export interface UrlMapDiscoverySummary {
@@ -49,7 +59,14 @@ export interface UrlMapDiscoverySummary {
   entryUrl: string;
   finalEntryUrl: string;
   allowedHosts: string[];
+  frozenSeedUrls: string[];
+  seedAttempts: FrozenSeedAttempt[];
+  discoveryStatus: 'ok' | 'partial' | 'blocked';
   counts: {
+    frozenSeeds: number;
+    completedSeeds: number;
+    blockedSeeds: number;
+    erroredSeeds: number;
     rawCandidates: number;
     resolvedUrls: number;
     unresolvedCandidates: number;
@@ -68,6 +85,8 @@ export interface FullUrlMapDiscoveryResult {
   entryUrl: string;
   finalEntryUrl: string;
   allowedHosts: string[];
+  frozenSeedUrls: string[];
+  seedAttempts: FrozenSeedAttempt[];
   rawCandidates: RawUrlCandidate[];
   urlMap: UrlMapEntry[];
   sourceCoverage: UrlSourceCoverageRecord[];
@@ -77,6 +96,10 @@ export interface FullUrlMapDiscoveryResult {
 }
 
 export interface FullUrlMapDiscoveryOptions extends SeedDiscoveryOptions {
+  /** Explicit finite seeds. Discovered URLs are never appended to this list. */
+  seedUrls?: string[];
+  /** Convert every --allow-host value to one root seed before discovery starts. */
+  seedAllowedHostRoots?: boolean;
   fallbackSitemapPaths?: string[];
   sitemapRequestTimeoutMs?: number;
   sitemapMaxRedirects?: number;
@@ -110,15 +133,37 @@ function now(): string {
   return new Date().toISOString();
 }
 
+function normaliseSeedUrl(value: string, baseUrl: string): string {
+  const url = new URL(value, baseUrl);
+  if (!['http:', 'https:'].includes(url.protocol)) throw new Error(`Seed URL must be HTTP(S): ${value}`);
+  url.hash = '';
+  return url.toString();
+}
+
 /**
- * Neutral URL resolution/canonicalisation only.
- *
- * No route policy is applied here: no content/path classification, no
- * relevance filtering, no query stripping, no route collapsing and no host
- * rejection. URL() provides standards-based resolution/normalisation; only
- * non-HTTP(S) values cannot become web-map entries and remain preserved in
- * raw-url-candidates.json.
+ * Builds the complete navigation seed set before any discovery scan starts.
+ * The returned array is frozen conceptually: callers must not enqueue URLs found by scanners.
  */
+export function buildFrozenSeedUrls(
+  entryUrl: string,
+  options: Pick<FullUrlMapDiscoveryOptions, 'seedUrls' | 'allowedHosts' | 'seedAllowedHostRoots'> = {},
+): string[] {
+  const entry = new URL(entryUrl);
+  const values: string[] = [entry.toString()];
+
+  for (const seed of options.seedUrls ?? []) values.push(normaliseSeedUrl(seed, entryUrl));
+
+  if (options.seedAllowedHostRoots) {
+    for (const rawHost of options.allowedHosts ?? []) {
+      const host = rawHost.trim();
+      if (!host) continue;
+      values.push(new URL(`${entry.protocol}//${host}/`).toString());
+    }
+  }
+
+  return [...new Set(values)];
+}
+
 function resolveRaw(candidate: RawUrlCandidate): string | null {
   try {
     const url = new URL(candidate.rawUrl, candidate.baseUrl);
@@ -197,31 +242,23 @@ function addUniqueProvenance(target: CandidateProvenance[], value: CandidateProv
   if (!target.some(item => JSON.stringify(item) === key)) target.push(value);
 }
 
-/**
- * Resolve + canonicalise + deduplicate the discovered map without filtering.
- * Every resolvable HTTP(S) candidate survives regardless of path, host,
- * resource type, API shape or inferred relevance.
- */
+/** Resolve + canonicalise + deduplicate without route/relevance filtering. */
 export function resolveAndDedupeUrlMap(rawCandidates: readonly RawUrlCandidate[]): UrlMapEntry[] {
   const byCanonical = new Map<string, UrlMapEntry>();
-
   for (const candidate of rawCandidates) {
     const canonicalUrl = resolveRaw(candidate);
     if (!canonicalUrl) continue;
-
     const existing = byCanonical.get(canonicalUrl);
     if (existing) {
       addUniqueProvenance(existing.provenance, candidate.provenance);
       continue;
     }
-
     byCanonical.set(canonicalUrl, {
       canonicalUrl,
       navigationUrl: canonicalUrl,
       provenance: [candidate.provenance],
     });
   }
-
   return [...byCanonical.values()].sort((a, b) => a.canonicalUrl.localeCompare(b.canonicalUrl));
 }
 
@@ -235,7 +272,6 @@ function sourceCoverageStatusForSitemaps(
   const errors =
     attempts.filter(item => item.status === 'fetch_error').length +
     result.robots.filter(item => item.status === 'fetch_error').length;
-
   if (result.status === 'found') {
     return {
       status: errors > 0 ? 'error' : 'complete',
@@ -254,9 +290,7 @@ function technicalErrorFamily(
 ): 'external_script_url_token' | 'json_config_url_token' | null {
   const source = seed.observedTechnicalSources.find(item => item.url === url);
   if (!source) return null;
-  if (source.resourceType === 'script' || /\.(?:m?js|cjs)(?:$|[?#])/i.test(url)) {
-    return 'external_script_url_token';
-  }
+  if (source.resourceType === 'script' || /\.(?:m?js|cjs)(?:$|[?#])/i.test(url)) return 'external_script_url_token';
   return 'json_config_url_token';
 }
 
@@ -265,16 +299,36 @@ function buildCoverage(
   urlMap: readonly UrlMapEntry[],
   seed: SeedDiscoveryResult,
   sitemap: SitemapDiscoveryResult,
+  seedAttempts: readonly FrozenSeedAttempt[],
   discoveryDurationMs: number,
 ): UrlSourceCoverageRecord[] {
   const sitemapStatus = sourceCoverageStatusForSitemaps(sitemap);
   const technicalErrors = seed.technicalSourceErrors;
   const rows: UrlSourceCoverageRecord[] = [];
 
+  const blockedSeeds = seedAttempts.filter(item => item.status === 'blocked');
+  const erroredSeeds = seedAttempts.filter(item => item.status === 'error');
+  rows.push({
+    extractorId: 'FROZEN_SEED_ACCESS_V1',
+    sourceFamily: 'seed_access',
+    status: blockedSeeds.length === seedAttempts.length && seedAttempts.length > 0
+      ? 'blocked'
+      : erroredSeeds.length > 0 || blockedSeeds.length > 0
+        ? 'error'
+        : 'complete',
+    candidateCount: seedAttempts.length,
+    resolvedCount: seedAttempts.filter(item => item.status === 'complete').length,
+    errorCount: blockedSeeds.length + erroredSeeds.length,
+    durationMs: discoveryDurationMs,
+    errorCodes: [
+      ...(blockedSeeds.length > 0 ? ['SEED_ACCESS_BLOCKED'] : []),
+      ...(erroredSeeds.length > 0 ? ['SEED_DISCOVERY_ERROR'] : []),
+    ],
+  });
+
   for (const { family, extractorId } of SEED_FAMILIES) {
     const familyCandidates = candidates.filter(candidate => candidate.provenance.sourceFamily === family);
     const familyResolved = urlMap.filter(item => item.provenance.some(prov => prov.sourceFamily === family));
-
     if (family === 'sitemap_page_url') {
       rows.push({
         extractorId,
@@ -288,12 +342,10 @@ function buildCoverage(
       });
       continue;
     }
-
     const isTechnicalTokenFamily = family === 'external_script_url_token' || family === 'json_config_url_token';
     const relatedTechnicalErrors = isTechnicalTokenFamily
       ? technicalErrors.filter(error => technicalErrorFamily(seed, error.url) === family)
       : [];
-
     rows.push({
       extractorId,
       sourceFamily: family,
@@ -305,8 +357,23 @@ function buildCoverage(
       errorCodes: [...new Set(relatedTechnicalErrors.map(error => error.code))],
     });
   }
-
   return rows;
+}
+
+function mergeSeedResults(entryUrl: string, results: readonly SeedDiscoveryResult[], allowedHosts: readonly string[]): SeedDiscoveryResult {
+  const primary = results.find(item => item.entryUrl === entryUrl) ?? results[0];
+  const observedTechnicalSources = new Map<string, SeedDiscoveryResult['observedTechnicalSources'][number]>();
+  for (const result of results) {
+    for (const item of result.observedTechnicalSources) observedTechnicalSources.set(item.url, item);
+  }
+  return {
+    entryUrl,
+    finalEntryUrl: primary?.finalEntryUrl ?? entryUrl,
+    allowedHosts: [...new Set(allowedHosts.map(host => host.toLowerCase()))],
+    rawCandidates: dedupeRawCandidates(results.flatMap(item => item.rawCandidates)),
+    observedTechnicalSources: [...observedTechnicalSources.values()],
+    technicalSourceErrors: results.flatMap(item => item.technicalSourceErrors),
+  };
 }
 
 export async function discoverFullUrlMap(
@@ -316,8 +383,63 @@ export async function discoverFullUrlMap(
 ): Promise<FullUrlMapDiscoveryResult> {
   const startedAt = now();
   const startedMs = Date.now();
+  const frozenSeedUrls = buildFrozenSeedUrls(entryUrl, options);
+  const seedAttempts: FrozenSeedAttempt[] = [];
+  const successfulSeeds: SeedDiscoveryResult[] = [];
 
-  const seed = await discoverFromSeedWithoutCrawl(page, entryUrl, options);
+  // Finite pass only. No discovered URL is ever appended to frozenSeedUrls.
+  for (const seedUrl of frozenSeedUrls) {
+    try {
+      const result = await discoverFromSeedWithoutCrawl(page, seedUrl, options);
+      successfulSeeds.push(result);
+      seedAttempts.push({
+        seedUrl,
+        status: 'complete',
+        finalUrl: result.finalEntryUrl,
+        rawCandidateCount: result.rawCandidates.length,
+        observedTechnicalSourceCount: result.observedTechnicalSources.length,
+        errorCode: null,
+        errorReason: null,
+        accessGateKind: null,
+        evidence: [],
+      });
+    } catch (error) {
+      if (error instanceof SeedAccessBlockedError) {
+        seedAttempts.push({
+          seedUrl,
+          status: 'blocked',
+          finalUrl: error.finalUrl,
+          rawCandidateCount: 0,
+          observedTechnicalSourceCount: 0,
+          errorCode: error.code,
+          errorReason: error.message,
+          accessGateKind: error.kind,
+          evidence: error.evidence,
+        });
+        continue;
+      }
+      seedAttempts.push({
+        seedUrl,
+        status: 'error',
+        finalUrl: page.url() || null,
+        rawCandidateCount: 0,
+        observedTechnicalSourceCount: 0,
+        errorCode: 'SEED_DISCOVERY_ERROR',
+        errorReason: error instanceof Error ? error.message : String(error),
+        accessGateKind: null,
+        evidence: [],
+      });
+    }
+  }
+
+  const seedHostnames = frozenSeedUrls.map(url => new URL(url).hostname);
+  const mergedAllowedHosts = [...new Set([
+    new URL(entryUrl).hostname,
+    ...(options.allowedHosts ?? []),
+    ...seedHostnames,
+  ].map(host => host.toLowerCase()))];
+  const seed = mergeSeedResults(entryUrl, successfulSeeds, mergedAllowedHosts);
+
   const fallbackPaths = options.fallbackSitemapPaths ?? DEFAULT_FALLBACK_SITEMAP_PATHS;
   const sitemapSeed = makeSitemapSeed(entryUrl, seed, fallbackPaths);
   const sitemap = await discoverSitemaps(page.request, entryUrl, sitemapSeed, {
@@ -335,8 +457,16 @@ export async function discoverFullUrlMap(
   const resolvedObservationCount = rawCandidates.filter(candidate => resolveRaw(candidate) !== null).length;
   const unresolvedCandidates = rawCandidates.length - resolvedObservationCount;
   const finishedAt = now();
-  const sourceCoverage = buildCoverage(rawCandidates, urlMap, seed, sitemap, Date.now() - startedMs);
+  const sourceCoverage = buildCoverage(rawCandidates, urlMap, seed, sitemap, seedAttempts, Date.now() - startedMs);
   const runId = randomUUID();
+  const completedSeeds = seedAttempts.filter(item => item.status === 'complete').length;
+  const blockedSeeds = seedAttempts.filter(item => item.status === 'blocked').length;
+  const erroredSeeds = seedAttempts.filter(item => item.status === 'error').length;
+  const discoveryStatus: UrlMapDiscoverySummary['discoveryStatus'] = completedSeeds === 0 && blockedSeeds > 0 && erroredSeeds === 0
+    ? 'blocked'
+    : blockedSeeds > 0 || erroredSeeds > 0
+      ? 'partial'
+      : 'ok';
 
   const summary: UrlMapDiscoverySummary = {
     runId,
@@ -345,7 +475,14 @@ export async function discoverFullUrlMap(
     entryUrl,
     finalEntryUrl: seed.finalEntryUrl,
     allowedHosts: seed.allowedHosts,
+    frozenSeedUrls,
+    seedAttempts,
+    discoveryStatus,
     counts: {
+      frozenSeeds: frozenSeedUrls.length,
+      completedSeeds,
+      blockedSeeds,
+      erroredSeeds,
       rawCandidates: rawCandidates.length,
       resolvedUrls: urlMap.length,
       unresolvedCandidates,
@@ -364,6 +501,8 @@ export async function discoverFullUrlMap(
     entryUrl,
     finalEntryUrl: seed.finalEntryUrl,
     allowedHosts: seed.allowedHosts,
+    frozenSeedUrls,
+    seedAttempts,
     rawCandidates,
     urlMap,
     sourceCoverage,
