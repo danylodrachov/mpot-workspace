@@ -159,9 +159,9 @@ async function main(): Promise<void> {
           error_codes: item.errorCodes,
         })),
       artifacts: {
-        raw_candidates: written.rawCandidatesPath,
+        source_url_list: written.sourceUrlListPath,
         source_coverage: written.sourceCoveragePath,
-        url_map: written.urlMapPath,
+        source_url_list_normalized: written.sourceUrlListNormalizedPath,
         sitemap: written.sitemapPath,
         summary: written.summaryPath,
       },

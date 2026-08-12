@@ -15,9 +15,9 @@ export interface FullUrlMapWrittenArtifacts {
   runId: string;
   runDate: string;
   runDir: string;
-  rawCandidatesPath: string;
+  sourceUrlListPath: string;
   sourceCoveragePath: string;
-  urlMapPath: string;
+  sourceUrlListNormalizedPath: string;
   sitemapPath: string;
   summaryPath: string;
 }
@@ -58,9 +58,9 @@ export function resolveFullUrlMapRunPaths(
     runId: result.runId,
     runDate,
     runDir,
-    rawCandidatesPath: path.join(runDir, 'source-url-list.json'),
+    sourceUrlListPath: path.join(runDir, 'source-url-list.json'),
     sourceCoveragePath: path.join(runDir, 'url-source-coverage-log.json'),
-    urlMapPath: path.join(runDir, 'url-list.json'),
+    sourceUrlListNormalizedPath: path.join(runDir, 'source-url-list-normalized.json'),
     sitemapPath: path.join(runDir, 'sitemap-discovery-log.json'),
     summaryPath: path.join(runDir, 'url-map-discovery-report.json'),
   };
@@ -74,9 +74,11 @@ export async function writeFullUrlMapDiscoveryArtifacts(
   await mkdir(path.dirname(paths.runDir), { recursive: true });
   await mkdir(paths.runDir, { recursive: false });
 
-  await atomicWrite(paths.rawCandidatesPath, json(result.rawCandidates));
+  // Raw homepage/seed and all other discovery observations stay unnormalized here.
+  await atomicWrite(paths.sourceUrlListPath, json(result.rawCandidates));
   await atomicWrite(paths.sourceCoveragePath, json(result.sourceCoverage));
-  await atomicWrite(paths.urlMapPath, json(result.urlMap));
+  // Resolution, canonicalization and deduplication are persisted separately.
+  await atomicWrite(paths.sourceUrlListNormalizedPath, json(result.urlMap));
   await atomicWrite(paths.sitemapPath, json(result.sitemapDiscovery));
   await atomicWrite(paths.summaryPath, json(result.summary));
 
