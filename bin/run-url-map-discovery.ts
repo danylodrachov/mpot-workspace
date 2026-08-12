@@ -2,8 +2,8 @@
 
 import path from 'node:path';
 
-import { discoverFromSeedWithoutCrawl } from '../src/research/url-map/seed-discovery.ts';
-import { writeSeedDiscoveryResult } from '../src/research/url-map/io.ts';
+import { discoverFullUrlMap } from '../src/research/url-map/full-discovery.ts';
+import { writeFullUrlMapDiscoveryArtifacts } from '../src/research/url-map/full-io.ts';
 
 function arg(name: string): string | undefined {
   const index = process.argv.indexOf(name);
@@ -34,11 +34,11 @@ async function main(): Promise<void> {
   const entryUrl = arg('--url');
   if (!entryUrl) {
     throw new Error(
-      'Usage: run-url-map-discovery.ts --url https://casino.example/ [--casino "Casino Name"] [--out-root data/casino-partner-researches] [--allow-host host] [--headed] [--cdp http://127.0.0.1:9222]',
+      'Usage: run-url-map-discovery.ts --url https://casino.example/ [--casino "Casino Name"] [--out path] [--allow-host host] [--headed] [--cdp http://127.0.0.1:9222]',
     );
   }
 
-  const outputRoot = path.resolve(arg('--out-root') ?? 'data/casino-partner-researches');
+  const outputRoot = path.resolve(arg('--out') ?? arg('--out-root') ?? 'data/casino-partner-researches');
   const casinoName = arg('--casino');
   const allowedHosts = args('--allow-host');
   const cdp = arg('--cdp');
@@ -66,29 +66,51 @@ async function main(): Promise<void> {
   ownsPage = !existingPage;
 
   try {
-    const result = await discoverFromSeedWithoutCrawl(page, entryUrl, {
+    const result = await discoverFullUrlMap(page, entryUrl, {
       allowedHosts,
       navigationTimeoutMs: intArg('--navigation-timeout-ms'),
       settleMs: intArg('--settle-ms'),
       technicalSourceTimeoutMs: intArg('--technical-source-timeout-ms'),
       maxTechnicalSources: intArg('--max-technical-sources'),
       maxTechnicalSourceBodyBytes: intArg('--max-technical-source-body-bytes'),
+      sitemapRequestTimeoutMs: intArg('--sitemap-timeout-ms'),
+      sitemapMaxRedirects: intArg('--sitemap-max-redirects'),
+      sitemapMaxFiles: intArg('--sitemap-max-files'),
+      sitemapMaxPageUrls: intArg('--sitemap-max-page-urls'),
     });
 
-    const written = await writeSeedDiscoveryResult(result, {
+    const written = await writeFullUrlMapDiscoveryArtifacts(result, {
       outputRoot,
       casinoName,
     });
 
     process.stdout.write(`${JSON.stringify({
       status: 'ok',
+      run_id: result.runId,
       casino: written.casinoSlug,
       run_date: written.runDate,
       run_dir: written.runDir,
-      json: written.jsonPath,
-      raw_candidates: result.rawCandidates.length,
-      observed_technical_sources: result.observedTechnicalSources.length,
-      technical_source_errors: result.technicalSourceErrors.length,
+      raw_candidates: result.summary.counts.rawCandidates,
+      canonical_decisions: result.summary.counts.canonicalDecisions,
+      accepted: result.summary.counts.accepted,
+      rejected: result.summary.counts.rejected,
+      tbd: result.summary.counts.tbd,
+      sitemap_page_urls: result.summary.counts.sitemapPageUrls,
+      observed_technical_sources: result.summary.counts.observedTechnicalSources,
+      technical_source_errors: result.summary.counts.technicalSourceErrors,
+      source_errors: result.sourceCoverage
+        .filter(item => item.status === 'error' || item.status === 'blocked')
+        .map(item => ({ source_family: item.sourceFamily, status: item.status, errors: item.errorCount, error_codes: item.errorCodes })),
+      artifacts: {
+        raw_candidates: written.rawCandidatesPath,
+        source_coverage: written.sourceCoveragePath,
+        accepted: written.acceptedPath,
+        rejected: written.rejectedPath,
+        tbd: written.tbdPath,
+        decisions: written.decisionsPath,
+        sitemap: written.sitemapPath,
+        summary: written.summaryPath,
+      },
     }, null, 2)}\n`);
   } finally {
     if (ownsPage) await page.close().catch(() => undefined);

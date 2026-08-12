@@ -8,7 +8,8 @@ export type SourceFamily =
   | 'inline_script_url_token'
   | 'history_route'
   | 'external_script_url_token'
-  | 'json_config_url_token';
+  | 'json_config_url_token'
+  | 'sitemap_page_url';
 
 export interface CandidateProvenance {
   sourceFamily: SourceFamily;
@@ -59,11 +60,12 @@ export interface ApiResponseLike {
   ok(): boolean;
   status(): number;
   headers(): Record<string, string>;
-  body(): Promise<Uint8Array>;
+  url?(): string;
+  body(): Promise<Buffer>;
 }
 
 export interface ApiRequestContextLike {
-  get(url: string, options?: { timeout?: number; failOnStatusCode?: boolean }): Promise<ApiResponseLike>;
+  get(url: string, options?: { timeout?: number; failOnStatusCode?: boolean; maxRedirects?: number }): Promise<ApiResponseLike>;
 }
 
 export interface PageLike {

@@ -24,7 +24,8 @@ export type RootDiscoverySource =
   | 'link_header'
   | 'rendered_dom'
   | 'document_text'
-  | 'network_observation';
+  | 'network_observation'
+  | 'configured_fallback';
 export type SitemapDiscoverySource = RootDiscoverySource | 'sitemap_index';
 
 export interface SeedObservation {
@@ -38,6 +39,7 @@ export interface SeedObservation {
   rendered_dom_candidates: string[];
   document_text_candidates: string[];
   network_candidates: string[];
+  configured_fallback_candidates?: string[];
   error_reason: string | null;
 }
 
@@ -559,7 +561,7 @@ function notDiscoveredReason(seed: SeedObservation, robots: RobotsResult[]): Sit
       'recursive child files declared by every verified sitemap index',
     ],
     limitations: [
-      'No guessed/hardcoded sitemap paths are probed.',
+      'Only explicitly configured fallback sitemap paths are probed; no unbounded path guessing is performed.',
       'No page URL discovered inside a sitemap is navigated or fetched.',
       'No links from the seed page are crawled.',
       'This result means "not discoverable from observed signals", not "the site has no sitemap".',
@@ -599,6 +601,7 @@ export async function discoverSitemaps(
   for (const url of seed.rendered_dom_candidates) addRootCandidate(rootCandidates, url, 'rendered_dom');
   for (const url of seed.document_text_candidates) addRootCandidate(rootCandidates, url, 'document_text');
   for (const url of seed.network_candidates) addRootCandidate(rootCandidates, url, 'network_observation');
+  for (const url of seed.configured_fallback_candidates ?? []) addRootCandidate(rootCandidates, url, 'configured_fallback');
 
   const preloadedRootUrl = seed.final_url && seed.main_response_body
     ? resolveHttpUrl(seed.final_url)

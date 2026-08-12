@@ -178,7 +178,7 @@ test('does not probe any guessed sitemap fallback path and reports not-discovera
   if (result.status !== 'not_discovered') return;
   assert.equal(result.reason.code, 'SITEMAP_NOT_DISCOVERABLE');
   assert.deepEqual(request.requested, ['https://example.com/robots.txt']);
-  assert.equal(result.reason.limitations.some(value => value.includes('No guessed/hardcoded sitemap paths')), true);
+  assert.equal(result.reason.limitations.some(value => value.includes('no unbounded path guessing is performed')), true);
 });
 
 test('treats the supplied input document itself as a sitemap without re-fetching it', async () => {
