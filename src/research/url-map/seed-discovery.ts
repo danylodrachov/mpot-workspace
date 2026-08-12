@@ -80,6 +80,14 @@ export async function discoverFromSeedWithoutCrawl(
 
   addCandidate(rawCandidates, entryUrl, entryUrl, 'entry_url', { sourceUrl: entryUrl });
 
+  // tsx/esbuild transpilation injects `__name(fn, "fn")` calls into function
+  // bodies it serializes for page.evaluate/addInitScript; that helper only
+  // exists in the Node bundle, so define a no-op shim before it runs in-page.
+  await page.addInitScript(() => {
+    const g = globalThis as unknown as { __name?: (fn: unknown, name: string) => unknown };
+    g.__name = g.__name ?? ((fn: unknown) => fn);
+  });
+
   await page.addInitScript(() => {
     const g = globalThis as unknown as {
       __mpotHistoryRoutes?: string[];
