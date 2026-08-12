@@ -17,10 +17,7 @@ export interface FullUrlMapWrittenArtifacts {
   runDir: string;
   rawCandidatesPath: string;
   sourceCoveragePath: string;
-  acceptedPath: string;
-  rejectedPath: string;
-  tbdPath: string;
-  decisionsPath: string;
+  urlMapPath: string;
   sitemapPath: string;
   summaryPath: string;
 }
@@ -47,6 +44,7 @@ export function resolveFullUrlMapRunPaths(
 ): FullUrlMapWrittenArtifacts {
   const now = options.now ?? new Date();
   if (Number.isNaN(now.getTime())) throw new Error('Invalid run date');
+
   const casinoSlug = slugifyCasinoName(options.casinoName ?? deriveCasinoNameFromUrl(result.entryUrl));
   const runDate = now.toISOString().slice(0, 10);
   const shortRunId = result.runId.replace(/[^a-z0-9]/gi, '').slice(0, 8).toLowerCase();
@@ -62,10 +60,7 @@ export function resolveFullUrlMapRunPaths(
     runDir,
     rawCandidatesPath: path.join(runDir, 'raw-url-candidates.json'),
     sourceCoveragePath: path.join(runDir, 'url-source-coverage.json'),
-    acceptedPath: path.join(runDir, 'accepted-url-inventory.json'),
-    rejectedPath: path.join(runDir, 'deterministic-rejected-urls.json'),
-    tbdPath: path.join(runDir, 'tbd-url-inventory.json'),
-    decisionsPath: path.join(runDir, 'url-clean-decisions.jsonl'),
+    urlMapPath: path.join(runDir, 'url-map.json'),
     sitemapPath: path.join(runDir, 'sitemap-discovery.json'),
     summaryPath: path.join(runDir, 'url-map-discovery-summary.json'),
   };
@@ -81,14 +76,9 @@ export async function writeFullUrlMapDiscoveryArtifacts(
 
   await atomicWrite(paths.rawCandidatesPath, json(result.rawCandidates));
   await atomicWrite(paths.sourceCoveragePath, json(result.sourceCoverage));
-  await atomicWrite(paths.acceptedPath, json(result.accepted));
-  await atomicWrite(paths.rejectedPath, json(result.rejected));
-  await atomicWrite(paths.tbdPath, json(result.tbd));
-  await atomicWrite(
-    paths.decisionsPath,
-    result.decisions.map(item => JSON.stringify(item)).join('\n') + (result.decisions.length ? '\n' : ''),
-  );
+  await atomicWrite(paths.urlMapPath, json(result.urlMap));
   await atomicWrite(paths.sitemapPath, json(result.sitemapDiscovery));
   await atomicWrite(paths.summaryPath, json(result.summary));
+
   return paths;
 }

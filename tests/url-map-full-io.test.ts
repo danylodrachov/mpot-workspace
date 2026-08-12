@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import { resolveFullUrlMapRunPaths } from '../src/research/url-map/full-io.ts';
 
-test('full URL-map runs are unique and cannot overwrite a same-day seed result path', () => {
+test('full URL-map runs are unique and persist one unfiltered URL map artifact', () => {
   const now = new Date('2026-08-12T10:20:30.000Z');
   const a = resolveFullUrlMapRunPaths(
     { entryUrl: 'https://westace.com/en', runId: '11111111-1111-4111-8111-111111111111' },
@@ -17,4 +17,9 @@ test('full URL-map runs are unique and cannot overwrite a same-day seed result p
   assert.notEqual(a.runDir, b.runDir);
   assert.match(a.runDir, /westace-norway-20260812T102030Z-11111111$/);
   assert.match(b.runDir, /westace-norway-20260812T102030Z-22222222$/);
+  assert.match(a.urlMapPath, /\/url-map\.json$/);
+  assert.equal('acceptedPath' in a, false);
+  assert.equal('rejectedPath' in a, false);
+  assert.equal('tbdPath' in a, false);
+  assert.equal('decisionsPath' in a, false);
 });

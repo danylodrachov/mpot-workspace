@@ -6,7 +6,6 @@ import {
   type SeedObservation,
   type SitemapDiscoveryResult,
 } from '../sitemap-discovery.ts';
-import { decideUrl, type UrlRuleDecision } from '../url-map-discovery/policy.ts';
 import { discoverFromSeedWithoutCrawl, type SeedDiscoveryOptions } from './seed-discovery.ts';
 import type {
   CandidateProvenance,
@@ -23,17 +22,23 @@ export interface UrlSourceCoverageRecord {
   sourceFamily: string;
   status: UrlSourceCoverageStatus;
   candidateCount: number;
-  acceptedCount: number;
+  resolvedCount: number;
   errorCount: number;
   durationMs: number | null;
   errorCodes: string[];
 }
 
-export interface UrlInventoryEntry {
+/**
+ * One resolved/canonical URL in the discovered map.
+ *
+ * This is intentionally not an allow/reject decision. Any HTTP(S) candidate
+ * that can be resolved is retained. `navigationUrl` is currently identical to
+ * `canonicalUrl` and exists only to keep downstream consumers explicit about
+ * which exact URL string they would navigate to.
+ */
+export interface UrlMapEntry {
   canonicalUrl: string;
   navigationUrl: string;
-  ruleId: string;
-  reason: string;
   provenance: CandidateProvenance[];
 }
 
@@ -46,10 +51,8 @@ export interface UrlMapDiscoverySummary {
   allowedHosts: string[];
   counts: {
     rawCandidates: number;
-    canonicalDecisions: number;
-    accepted: number;
-    rejected: number;
-    tbd: number;
+    resolvedUrls: number;
+    unresolvedCandidates: number;
     observedTechnicalSources: number;
     technicalSourceErrors: number;
     sitemapPageUrls: number;
@@ -66,11 +69,8 @@ export interface FullUrlMapDiscoveryResult {
   finalEntryUrl: string;
   allowedHosts: string[];
   rawCandidates: RawUrlCandidate[];
+  urlMap: UrlMapEntry[];
   sourceCoverage: UrlSourceCoverageRecord[];
-  accepted: UrlInventoryEntry[];
-  rejected: UrlRuleDecision[];
-  tbd: UrlRuleDecision[];
-  decisions: UrlRuleDecision[];
   seedDiscovery: SeedDiscoveryResult;
   sitemapDiscovery: SitemapDiscoveryResult;
   summary: UrlMapDiscoverySummary;
@@ -110,6 +110,15 @@ function now(): string {
   return new Date().toISOString();
 }
 
+/**
+ * Neutral URL resolution/canonicalisation only.
+ *
+ * No route policy is applied here: no content/path classification, no
+ * relevance filtering, no query stripping, no route collapsing and no host
+ * rejection. URL() provides standards-based resolution/normalisation; only
+ * non-HTTP(S) values cannot become web-map entries and remain preserved in
+ * raw-url-candidates.json.
+ */
 function resolveRaw(candidate: RawUrlCandidate): string | null {
   try {
     const url = new URL(candidate.rawUrl, candidate.baseUrl);
@@ -138,18 +147,20 @@ function dedupeRawCandidates(candidates: readonly RawUrlCandidate[]): RawUrlCand
   return out;
 }
 
-function makeSitemapSeed(entryUrl: string, seed: SeedDiscoveryResult, fallbackPaths: readonly string[]): SeedObservation {
+function makeSitemapSeed(
+  entryUrl: string,
+  seed: SeedDiscoveryResult,
+  fallbackPaths: readonly string[],
+): SeedObservation {
   const fallbackUrls = fallbackPaths.map(path => new URL(path, entryUrl).toString());
   const rendered = new Set<string>();
   const network = new Set<string>();
-
   for (const candidate of seed.rawCandidates) {
     const resolved = resolveRaw(candidate);
     if (!resolved || !looksLikeSitemapReference(resolved)) continue;
     if (candidate.provenance.sourceFamily.startsWith('network_')) network.add(resolved);
     else rendered.add(resolved);
   }
-
   return {
     requested_url: entryUrl,
     final_url: seed.finalEntryUrl || entryUrl,
@@ -181,24 +192,49 @@ function sitemapRawCandidates(result: SitemapDiscoveryResult, entryUrl: string):
   }));
 }
 
-function mergeProvenance(candidates: readonly RawUrlCandidate[]): Map<string, CandidateProvenance[]> {
-  const map = new Map<string, CandidateProvenance[]>();
-  for (const candidate of candidates) {
-    const resolved = resolveRaw(candidate);
-    if (!resolved) continue;
-    const current = map.get(resolved) ?? [];
-    const key = JSON.stringify(candidate.provenance);
-    if (!current.some(item => JSON.stringify(item) === key)) current.push(candidate.provenance);
-    map.set(resolved, current);
-  }
-  return map;
+function addUniqueProvenance(target: CandidateProvenance[], value: CandidateProvenance): void {
+  const key = JSON.stringify(value);
+  if (!target.some(item => JSON.stringify(item) === key)) target.push(value);
 }
 
-function sourceCoverageStatusForSitemaps(result: SitemapDiscoveryResult): { status: UrlSourceCoverageStatus; errorCodes: string[]; errorCount: number } {
+/**
+ * Resolve + canonicalise + deduplicate the discovered map without filtering.
+ * Every resolvable HTTP(S) candidate survives regardless of path, host,
+ * resource type, API shape or inferred relevance.
+ */
+export function resolveAndDedupeUrlMap(rawCandidates: readonly RawUrlCandidate[]): UrlMapEntry[] {
+  const byCanonical = new Map<string, UrlMapEntry>();
+
+  for (const candidate of rawCandidates) {
+    const canonicalUrl = resolveRaw(candidate);
+    if (!canonicalUrl) continue;
+
+    const existing = byCanonical.get(canonicalUrl);
+    if (existing) {
+      addUniqueProvenance(existing.provenance, candidate.provenance);
+      continue;
+    }
+
+    byCanonical.set(canonicalUrl, {
+      canonicalUrl,
+      navigationUrl: canonicalUrl,
+      provenance: [candidate.provenance],
+    });
+  }
+
+  return [...byCanonical.values()].sort((a, b) => a.canonicalUrl.localeCompare(b.canonicalUrl));
+}
+
+function sourceCoverageStatusForSitemaps(
+  result: SitemapDiscoveryResult,
+): { status: UrlSourceCoverageStatus; errorCodes: string[]; errorCount: number } {
   const attempts = result.attempts ?? [];
-  const blocked = attempts.some(item => item.status === 'http_error' && [401, 403, 429].includes(item.http_status ?? 0)) ||
+  const blocked =
+    attempts.some(item => item.status === 'http_error' && [401, 403, 429].includes(item.http_status ?? 0)) ||
     result.robots.some(item => item.status === 'http_error' && [401, 403, 429].includes(item.http_status ?? 0));
-  const errors = attempts.filter(item => item.status === 'fetch_error').length + result.robots.filter(item => item.status === 'fetch_error').length;
+  const errors =
+    attempts.filter(item => item.status === 'fetch_error').length +
+    result.robots.filter(item => item.status === 'fetch_error').length;
 
   if (result.status === 'found') {
     return {
@@ -212,16 +248,21 @@ function sourceCoverageStatusForSitemaps(result: SitemapDiscoveryResult): { stat
   return { status: 'absent', errorCodes: [], errorCount: 0 };
 }
 
-function technicalErrorFamily(seed: SeedDiscoveryResult, url: string): 'external_script_url_token' | 'json_config_url_token' | null {
+function technicalErrorFamily(
+  seed: SeedDiscoveryResult,
+  url: string,
+): 'external_script_url_token' | 'json_config_url_token' | null {
   const source = seed.observedTechnicalSources.find(item => item.url === url);
   if (!source) return null;
-  if (source.resourceType === 'script' || /\.(?:m?js|cjs)(?:$|[?#])/i.test(url)) return 'external_script_url_token';
+  if (source.resourceType === 'script' || /\.(?:m?js|cjs)(?:$|[?#])/i.test(url)) {
+    return 'external_script_url_token';
+  }
   return 'json_config_url_token';
 }
 
 function buildCoverage(
   candidates: readonly RawUrlCandidate[],
-  decisions: readonly UrlRuleDecision[],
+  urlMap: readonly UrlMapEntry[],
   seed: SeedDiscoveryResult,
   sitemap: SitemapDiscoveryResult,
   discoveryDurationMs: number,
@@ -232,9 +273,7 @@ function buildCoverage(
 
   for (const { family, extractorId } of SEED_FAMILIES) {
     const familyCandidates = candidates.filter(candidate => candidate.provenance.sourceFamily === family);
-    const familyAccepted = decisions.filter(item =>
-      item.decision === 'accepted' && item.provenance.some(prov => prov.sourceFamily === family),
-    );
+    const familyResolved = urlMap.filter(item => item.provenance.some(prov => prov.sourceFamily === family));
 
     if (family === 'sitemap_page_url') {
       rows.push({
@@ -242,7 +281,7 @@ function buildCoverage(
         sourceFamily: family,
         status: sitemapStatus.status,
         candidateCount: familyCandidates.length,
-        acceptedCount: familyAccepted.length,
+        resolvedCount: familyResolved.length,
         errorCount: sitemapStatus.errorCount,
         durationMs: discoveryDurationMs,
         errorCodes: sitemapStatus.errorCodes,
@@ -254,57 +293,20 @@ function buildCoverage(
     const relatedTechnicalErrors = isTechnicalTokenFamily
       ? technicalErrors.filter(error => technicalErrorFamily(seed, error.url) === family)
       : [];
+
     rows.push({
       extractorId,
       sourceFamily: family,
-      status: relatedTechnicalErrors.length > 0 ? 'error' : (familyCandidates.length > 0 ? 'complete' : 'absent'),
+      status: relatedTechnicalErrors.length > 0 ? 'error' : familyCandidates.length > 0 ? 'complete' : 'absent',
       candidateCount: familyCandidates.length,
-      acceptedCount: familyAccepted.length,
+      resolvedCount: familyResolved.length,
       errorCount: relatedTechnicalErrors.length,
       durationMs: discoveryDurationMs,
       errorCodes: [...new Set(relatedTechnicalErrors.map(error => error.code))],
     });
   }
+
   return rows;
-}
-
-function collapseDecisions(
-  rawCandidates: readonly RawUrlCandidate[],
-  allowedHosts: ReadonlySet<string>,
-): UrlRuleDecision[] {
-  const provenanceMap = mergeProvenance(rawCandidates);
-  const byCanonical = new Map<string, UrlRuleDecision>();
-  const malformed: UrlRuleDecision[] = [];
-
-  for (const candidate of rawCandidates) {
-    const resolved = resolveRaw(candidate);
-    const merged = resolved ? (provenanceMap.get(resolved) ?? [candidate.provenance]) : [candidate.provenance];
-    const result = decideUrl(candidate, allowedHosts, merged);
-    if (!result.canonicalUrl) {
-      malformed.push(result);
-      continue;
-    }
-    const previous = byCanonical.get(result.canonicalUrl);
-    if (!previous) {
-      byCanonical.set(result.canonicalUrl, result);
-      continue;
-    }
-
-    // Same canonical target must have one deterministic terminal decision. If duplicate
-    // observations disagree, accepted > tbd > rejected to avoid provenance-order effects
-    // when one raw form carries an explicitly approved route shape.
-    const rank = { rejected: 0, tbd: 1, accepted: 2 } as const;
-    const chosen = rank[result.decision] > rank[previous.decision] ? result : previous;
-    const provenance = [...previous.provenance];
-    for (const item of result.provenance) {
-      if (!provenance.some(existing => JSON.stringify(existing) === JSON.stringify(item))) provenance.push(item);
-    }
-    byCanonical.set(result.canonicalUrl, { ...chosen, provenance });
-  }
-
-  return [...byCanonical.values(), ...malformed].sort((a, b) =>
-    (a.canonicalUrl ?? a.rawUrl).localeCompare(b.canonicalUrl ?? b.rawUrl),
-  );
 }
 
 export async function discoverFullUrlMap(
@@ -314,8 +316,8 @@ export async function discoverFullUrlMap(
 ): Promise<FullUrlMapDiscoveryResult> {
   const startedAt = now();
   const startedMs = Date.now();
-  const seed = await discoverFromSeedWithoutCrawl(page, entryUrl, options);
 
+  const seed = await discoverFromSeedWithoutCrawl(page, entryUrl, options);
   const fallbackPaths = options.fallbackSitemapPaths ?? DEFAULT_FALLBACK_SITEMAP_PATHS;
   const sitemapSeed = makeSitemapSeed(entryUrl, seed, fallbackPaths);
   const sitemap = await discoverSitemaps(page.request, entryUrl, sitemapSeed, {
@@ -329,23 +331,11 @@ export async function discoverFullUrlMap(
     ...seed.rawCandidates,
     ...sitemapRawCandidates(sitemap, entryUrl),
   ]);
-  const allowedHosts = new Set(seed.allowedHosts.map(host => host.toLowerCase()));
-  const decisions = collapseDecisions(rawCandidates, allowedHosts);
-  const accepted = decisions
-    .filter((item): item is UrlRuleDecision & { canonicalUrl: string; navigationUrl: string } =>
-      item.decision === 'accepted' && Boolean(item.canonicalUrl) && Boolean(item.navigationUrl),
-    )
-    .map(item => ({
-      canonicalUrl: item.canonicalUrl,
-      navigationUrl: item.navigationUrl,
-      ruleId: item.ruleId,
-      reason: item.reason,
-      provenance: item.provenance,
-    }));
-  const rejected = decisions.filter(item => item.decision === 'rejected');
-  const tbd = decisions.filter(item => item.decision === 'tbd');
+  const urlMap = resolveAndDedupeUrlMap(rawCandidates);
+  const resolvedObservationCount = rawCandidates.filter(candidate => resolveRaw(candidate) !== null).length;
+  const unresolvedCandidates = rawCandidates.length - resolvedObservationCount;
   const finishedAt = now();
-  const sourceCoverage = buildCoverage(rawCandidates, decisions, seed, sitemap, Date.now() - startedMs);
+  const sourceCoverage = buildCoverage(rawCandidates, urlMap, seed, sitemap, Date.now() - startedMs);
   const runId = randomUUID();
 
   const summary: UrlMapDiscoverySummary = {
@@ -357,10 +347,8 @@ export async function discoverFullUrlMap(
     allowedHosts: seed.allowedHosts,
     counts: {
       rawCandidates: rawCandidates.length,
-      canonicalDecisions: decisions.length,
-      accepted: accepted.length,
-      rejected: rejected.length,
-      tbd: tbd.length,
+      resolvedUrls: urlMap.length,
+      unresolvedCandidates,
       observedTechnicalSources: seed.observedTechnicalSources.length,
       technicalSourceErrors: seed.technicalSourceErrors.length,
       sitemapPageUrls: sitemap.status === 'found' ? sitemap.page_urls.length : 0,
@@ -377,11 +365,8 @@ export async function discoverFullUrlMap(
     finalEntryUrl: seed.finalEntryUrl,
     allowedHosts: seed.allowedHosts,
     rawCandidates,
+    urlMap,
     sourceCoverage,
-    accepted,
-    rejected,
-    tbd,
-    decisions,
     seedDiscovery: seed,
     sitemapDiscovery: sitemap,
     summary,
