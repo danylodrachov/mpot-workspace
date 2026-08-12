@@ -1,5 +1,6 @@
 export type SourceFamily =
   | 'entry_url'
+  | 'dom_navigation_url'
   | 'dom_url_attribute'
   | 'document_metadata'
   | 'network_document'

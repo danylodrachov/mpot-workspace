@@ -8,6 +8,7 @@ import type {
   SourceFamily,
 } from './types.ts';
 import { extractUrlLikeTokens, resolveCasinoRouteToken } from './token-extractor.ts';
+import { collectStableDomNavigationCandidates } from './dom-navigation-collector.ts';
 import {
   scanObservedTechnicalSources,
   shouldScanObservedTechnicalSource,
@@ -365,6 +366,11 @@ export async function discoverFromSeedWithoutCrawl(
       return { attrs, metadata, inlineScripts, performanceUrls, historyRoutes, currentUrl: location.href };
     }));
     finalEntryUrl = pageSignals.currentUrl || page.url() || finalEntryUrl;
+
+    // Homepage/document links are the primary navigation source. Sample them separately
+    // after hydration so a SPA that renders anchors after DOMContentLoaded/settle is not
+    // mistaken for a page containing only preload/script/resource hrefs.
+    rawCandidates.push(...await collectStableDomNavigationCandidates(page, finalEntryUrl));
 
     for (const item of pageSignals.attrs) {
       addCandidate(rawCandidates, item.value, finalEntryUrl, 'dom_url_attribute', {

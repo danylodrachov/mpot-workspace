@@ -45,14 +45,17 @@ test('browser-confirmed final redirect host joins deterministic seed scope', asy
           currentUrl: 'https://megarich22.co/',
         };
       }
-      return {
-        attrs: [],
-        metadata: [],
-        inlineScripts: [],
-        performanceUrls: [],
-        historyRoutes: [],
-        currentUrl: 'https://megarich22.co/',
-      };
+      if (evaluateCall === 2) {
+        return {
+          attrs: [],
+          metadata: [],
+          inlineScripts: [],
+          performanceUrls: [],
+          historyRoutes: [],
+          currentUrl: 'https://megarich22.co/',
+        };
+      }
+      return [];
     },
   };
 

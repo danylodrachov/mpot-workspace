@@ -1,4 +1,7 @@
 export * from './types.ts';
+export * from './navigation-url.ts';
+export * from './candidate-cleanup.ts';
+export * from './dom-navigation-collector.ts';
 export * from './token-extractor.ts';
 export * from './technical-source-scan.ts';
 export * from './seed-discovery.ts';

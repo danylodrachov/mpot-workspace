@@ -20,6 +20,7 @@ import type {
   SeedDiscoveryResult,
   SourceFamily,
 } from './types.ts';
+import { buildCleanDocumentUrlMap } from './candidate-cleanup.ts';
 
 export type UrlSourceCoverageStatus = 'complete' | 'absent' | 'blocked' | 'unsupported' | 'error';
 
@@ -119,6 +120,7 @@ const DEFAULT_FALLBACK_SITEMAP_PATHS = [
 
 const SEED_FAMILIES: Array<{ family: SourceFamily; extractorId: string }> = [
   { family: 'entry_url', extractorId: 'ENTRY_URL_V1' },
+  { family: 'dom_navigation_url', extractorId: 'DOM_NAVIGATION_URLS_V1' },
   { family: 'dom_url_attribute', extractorId: 'DOM_URL_ATTRIBUTES_V1' },
   { family: 'document_metadata', extractorId: 'DOCUMENT_METADATA_URLS_V1' },
   { family: 'network_document', extractorId: 'NETWORK_DOCUMENT_URLS_V1' },
@@ -495,7 +497,8 @@ export async function discoverFullUrlMap(
     ...seed.rawCandidates,
     ...sitemapRawCandidates(sitemap, entryUrl),
   ]);
-  const urlMap = resolveAndDedupeUrlMap(rawCandidates);
+  // source-url-list remains raw evidence. url-list is now the navigable document map.
+  const urlMap = buildCleanDocumentUrlMap(rawCandidates, new Set(mergedAllowedHosts));
   const resolvedObservationCount = rawCandidates.filter(candidate => resolveRaw(candidate) !== null).length;
   const unresolvedCandidates = rawCandidates.length - resolvedObservationCount;
   const finishedAt = now();

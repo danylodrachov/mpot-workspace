@@ -77,6 +77,7 @@ test('technical scanner fetches observed cross-origin bundle but emits only casi
 
 test('seed discovery performs exactly one page navigation and scans observed CDN resources', async () => {
   let requestListener: ((request: RequestLike) => void) | undefined;
+  let evaluateCalls = 0;
   const gotoCalls: string[] = [];
   const fetched: string[] = [];
 
@@ -104,16 +105,21 @@ test('seed discovery performs exactly one page navigation and scans observed CDN
     },
     async waitForTimeout() {},
     async evaluate<T>() {
-      return {
-        attrs: [
-          { value: '/en/bonus/rules', label: 'a[href]' },
-          { value: 'https://traincdn.com/assets/app.js', label: 'script[src]' },
-        ],
-        metadata: [],
-        inlineScripts: [],
-        performanceUrls: ['https://traincdn.com/assets/app.js'],
-        historyRoutes: [],
-      } as T;
+      evaluateCalls += 1;
+      if (evaluateCalls === 2) {
+        return {
+          attrs: [
+            { value: '/en/bonus/rules', label: 'a[href]' },
+            { value: 'https://traincdn.com/assets/app.js', label: 'script[src]' },
+          ],
+          metadata: [],
+          inlineScripts: [],
+          performanceUrls: ['https://traincdn.com/assets/app.js'],
+          historyRoutes: [],
+        } as T;
+      }
+      if (evaluateCalls === 1) return {} as T;
+      return [] as T;
     },
   };
 
